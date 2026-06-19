@@ -83,7 +83,7 @@ from pydantic import BaseModel, Field
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
 # ---------------------- CONFIG DEFAULTS ----------------------
-DEFAULT_URL = "https://visitors.brsgolf.com/rosapenna#/course/3"
+DEFAULT_URL = "https://visitors.brsgolf.com/rosapenna#/course/1"
 DEBUG = True  # saves debug_<session>_<step>.png/.txt screenshots on failures
 
 ORDINAL_WORDS = {2: "Two", 3: "Three", 4: "Four"}
