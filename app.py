@@ -7,7 +7,8 @@ variables in a script. It deliberately stops BEFORE payment — the form
 gets filled in automatically and a human enters card details and clicks
 "Pay" themselves.
 
-This version is hardened for running unattended on a VPS:
+This version is hardened for running unattended on a VPS AND ships with
+full interactive Swagger / ReDoc documentation:
 
   * Config via environment variables (12-factor), with sane defaults.
   * API-key auth on every endpoint except /health.
@@ -24,6 +25,12 @@ This version is hardened for running unattended on a VPS:
     so you can connect from your laptop, see the browser, and complete
     payment manually — exactly like the original local-machine workflow,
     just remote.
+  * Rich OpenAPI metadata: every route has a summary, long-form
+    description, response description, and a `tags` grouping so the
+    generated Swagger UI (/docs) and ReDoc (/redoc) pages are genuinely
+    useful, not just auto-generated stubs. Every request/response model
+    field carries a `description` and a realistic `example`, so the
+    "Try it out" panel in Swagger is pre-filled with sensible values.
 
 ------------------------------------------------------------------------
 INSTALL (Ubuntu/Debian VPS)
@@ -88,9 +95,17 @@ Example unit file (save as /etc/systemd/system/booking-api.service):
 Then: sudo systemctl daemon-reload && sudo systemctl enable --now booking-api
 
 ------------------------------------------------------------------------
-USING IT
+USING IT / DOCS
 ------------------------------------------------------------------------
 Every request needs a header:  X-API-Key: <your BOOKING_API_KEY>
+
+Interactive documentation is auto-served once the app is running:
+
+    Swagger UI:  http://<host>:<port>/docs
+    ReDoc:       http://<host>:<port>/redoc
+    Raw schema:  http://<host>:<port>/openapi.json
+
+Routes:
 
     POST /available-times   { "course_name": "...", "holes": "18 Holes", "desired_date": "2026-07-26",
                               "earliest_time": "07:00", "latest_time": "15:00" }
@@ -122,7 +137,7 @@ from typing import Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Header, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from playwright.sync_api import sync_playwright, Page, TimeoutError as PWTimeout
 
@@ -274,101 +289,223 @@ def stop_vnc_server():
 # ============================================================
 # Request / response models
 # ============================================================
+# Every field below carries a `description` (shown in Swagger's schema
+# panel) and, where useful, an `example` — Pydantic v2 folds field-level
+# examples into the generated JSON Schema, which Swagger UI then uses to
+# pre-populate the "Try it out" request body editor.
 
 class PersonalInfo(BaseModel):
-    first_name: str
-    last_name: str
-    country: str
-    email: str
-    telephone: str
-    mobile: Optional[str] = ""
-    handicap: str
-    club: str
-    cdh_number: Optional[str] = ""
-    special_requirements: Optional[str] = ""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "first_name": "Aoife",
+            "last_name": "Byrne",
+            "country": "Ireland",
+            "email": "aoife.byrne@example.com",
+            "telephone": "+353 87 123 4567",
+            "mobile": "+353 87 123 4567",
+            "handicap": "14.2",
+            "club": "Portsalon Golf Club",
+            "cdh_number": "1234567",
+            "special_requirements": "",
+        }
+    })
+
+    first_name: str = Field(..., description="Golfer's first name, as it should appear on the booking.")
+    last_name: str = Field(..., description="Golfer's last (family) name.")
+    country: str = Field(..., description="Country of residence, matched against the site's country dropdown by visible label.")
+    email: str = Field(..., description="Contact email address for the booking confirmation.")
+    telephone: str = Field(..., description="Primary telephone number, including country code if available.")
+    mobile: Optional[str] = Field("", description="Mobile number, if different from the telephone field. Optional.")
+    handicap: str = Field(..., description="Official golf handicap index, e.g. '14.2'.")
+    club: str = Field(..., description="Home golf club name.")
+    cdh_number: Optional[str] = Field("", description="CDH (Club/Deputy Handicap) reference number, if applicable. Optional.")
+    special_requirements: Optional[str] = Field("", description="Free-text notes for the course (dietary, mobility, etc). Optional.")
 
 
 class AdditionalPlayer(BaseModel):
-    name: str
-    handicap: str
-    club: str
-    cdh_number: Optional[str] = ""
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "name": "Ciaran Doyle",
+            "handicap": "9.4",
+            "club": "Rosapenna Golf Club",
+            "cdh_number": "7654321",
+        }
+    })
+
+    name: str = Field(..., description="Full name of the additional player (players 2-4 on the booking).")
+    handicap: str = Field(..., description="This player's golf handicap index.")
+    club: str = Field(..., description="This player's home golf club.")
+    cdh_number: Optional[str] = Field("", description="This player's CDH reference number, if applicable. Optional.")
 
 
 class MarketingConsent(BaseModel):
-    email: bool = False
-    sms: bool = False
-    post: bool = False
-    telephone: bool = False
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"email": True, "sms": False, "post": False, "telephone": False}
+    })
+
+    email: bool = Field(False, description="Opt in to marketing emails.")
+    sms: bool = Field(False, description="Opt in to marketing SMS messages.")
+    post: bool = Field(False, description="Opt in to marketing by post.")
+    telephone: bool = Field(False, description="Opt in to marketing phone calls.")
 
 
 class BookingRequest(BaseModel):
-    url: str = settings.default_url
-    course_name: str = "Old Tom Morris Links"   # or "Sandy Hills Links"
-    holes: str = "18 Holes"                      # or "9 Holes"
-    desired_date: Optional[str] = None            # e.g. "2026-07-26" (YYYY-MM-DD), or None to leave the site's default date
-    earliest_time: Optional[str] = None            # "HH:MM", e.g. "07:00" — drags the Time slider's left handle; None leaves it at default
-    latest_time: Optional[str] = None              # "HH:MM", e.g. "17:00" — drags the Time slider's right handle; None leaves it at default
-    desired_time: str = Field(..., description="Must exactly match a visible time button, e.g. '07:30'")
-    player_count: int = 1
-    personal_info: PersonalInfo
-    additional_players: List[AdditionalPlayer] = []
-    marketing_consent: MarketingConsent = MarketingConsent()
-    accept_terms: bool = True
-    debug: bool = settings.debug_screenshots
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "url": settings.default_url,
+            "course_name": "Old Tom Morris Links",
+            "holes": "18 Holes",
+            "desired_date": "2026-07-26",
+            "earliest_time": "07:00",
+            "latest_time": "15:00",
+            "desired_time": "07:30",
+            "player_count": 2,
+            "personal_info": {
+                "first_name": "Aoife",
+                "last_name": "Byrne",
+                "country": "Ireland",
+                "email": "aoife.byrne@example.com",
+                "telephone": "+353 87 123 4567",
+                "mobile": "+353 87 123 4567",
+                "handicap": "14.2",
+                "club": "Portsalon Golf Club",
+                "cdh_number": "1234567",
+                "special_requirements": "",
+            },
+            "additional_players": [
+                {"name": "Ciaran Doyle", "handicap": "9.4", "club": "Rosapenna Golf Club", "cdh_number": "7654321"}
+            ],
+            "marketing_consent": {"email": True, "sms": False, "post": False, "telephone": False},
+            "accept_terms": True,
+            "debug": True,
+        }
+    })
+
+    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page to book from.")
+    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site, e.g. 'Old Tom Morris Links' or 'Sandy Hills Links'.")
+    holes: str = Field("18 Holes", description="Holes option label, e.g. '18 Holes' or '9 Holes'.")
+    desired_date: Optional[str] = Field(None, description="Date to book, formatted 'YYYY-MM-DD'. Omit to leave the site's default (usually today).")
+    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider's left handle. Omit to leave it at its default.")
+    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider's right handle. Omit to leave it at its default.")
+    desired_time: str = Field(..., description="The exact tee time to book. Must exactly match a visible time button, e.g. '07:30'.")
+    player_count: int = Field(1, description="Number of players on the booking (1-4). Additional players beyond the first must be supplied in `additional_players`.")
+    personal_info: PersonalInfo = Field(..., description="Contact/lead player details used to fill the personal information section of the form.")
+    additional_players: List[AdditionalPlayer] = Field(default_factory=list, description="Details for players 2, 3, 4 — supply one entry per additional player, in order.")
+    marketing_consent: MarketingConsent = Field(default_factory=MarketingConsent, description="Which marketing consent checkboxes to tick. Anything omitted defaults to unchecked.")
+    accept_terms: bool = Field(True, description="Whether to tick the terms & conditions checkbox. Set False to leave it unchecked (booking will likely fail at payment).")
+    debug: bool = Field(settings.debug_screenshots, description="If true, saves a screenshot + visible-text dump to disk after each major step, useful for diagnosing selector failures.")
 
 
 class BookingResponse(BaseModel):
-    session_id: str
-    status: str           # "filled" | "error" | "running"
-    message: str
-    log: List[str]
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "status": "filled",
+            "message": "Form filled successfully. Browser is open — complete payment manually.",
+            "log": ["ok: select course", "ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')"],
+        }
+    })
+
+    session_id: str = Field(..., description="Unique ID for this booking automation session. Use it to poll status or request the browser be closed.")
+    status: str = Field(..., description="One of: 'filled' (form ready, awaiting manual payment), 'error' (automation failed), 'running' (still in progress, poll GET /bookings/{id}).")
+    message: str = Field(..., description="Human-readable summary of what happened or what to do next.")
+    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced during the automation run.")
 
 
 class SessionStatusResponse(BaseModel):
-    session_id: str
-    status: str            # "running" | "filled" | "error" | "closed"
-    created_at: float
-    log: List[str]
-    error: Optional[str] = None
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+            "status": "filled",
+            "created_at": 1753600000.0,
+            "log": ["ok: select course", "ok: selected date 2026-07-26"],
+            "error": None,
+        }
+    })
+
+    session_id: str = Field(..., description="The session ID being queried.")
+    status: str = Field(..., description="One of: 'running', 'filled', 'error', 'closed'.")
+    created_at: float = Field(..., description="Unix timestamp (seconds) when the session was created.")
+    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced so far.")
+    error: Optional[str] = Field(None, description="Error message, present only when status is 'error'.")
 
 
 class AvailableTimesRequest(BaseModel):
-    url: str = settings.default_url
-    course_name: str = "Old Tom Morris Links"   # or "Sandy Hills Links"
-    holes: str = "18 Holes"                      # or "9 Holes"
-    desired_date: Optional[str] = None            # e.g. "2026-07-26" (YYYY-MM-DD), or None to leave the site's default date
-    earliest_time: Optional[str] = None            # "HH:MM", e.g. "07:00" — drags the Time slider's left handle; None leaves it at default
-    latest_time: Optional[str] = None              # "HH:MM", e.g. "17:00" — drags the Time slider's right handle; None leaves it at default
-    headless: bool = True   # no need to show the browser just to read times
-    debug: bool = False
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "url": settings.default_url,
+            "course_name": "Old Tom Morris Links",
+            "holes": "18 Holes",
+            "desired_date": "2026-07-26",
+            "earliest_time": "07:00",
+            "latest_time": "15:00",
+            "headless": True,
+            "debug": False,
+        }
+    })
+
+    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page to query.")
+    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site, e.g. 'Old Tom Morris Links' or 'Sandy Hills Links'.")
+    holes: str = Field("18 Holes", description="Holes option label, e.g. '18 Holes' or '9 Holes'.")
+    desired_date: Optional[str] = Field(None, description="Date to check, formatted 'YYYY-MM-DD'. Omit to leave the site's default (usually today).")
+    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider's left handle. Omit to leave it at its default.")
+    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider's right handle. Omit to leave it at its default.")
+    headless: bool = Field(True, description="Run the browser headlessly. Safe to leave true — this endpoint only reads data, it never needs a human to see it.")
+    debug: bool = Field(False, description="If true, dumps extra diagnostic state (e.g. calendar geometry JSON) to disk when a step fails.")
 
 
 class PlayerOption(BaseModel):
-    id: str
-    label: str
-    player_count: Optional[int] = None
-    price: Optional[str] = None
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"id": "opt-2ball-0730", "label": "2 Players - €180.00", "player_count": 2, "price": "€180.00"}
+    })
+
+    id: str = Field(..., description="DOM element id of this option's button on the source page (useful for debugging, not needed for booking).")
+    label: str = Field(..., description="Raw visible label of the option, e.g. '2 Players - €180.00'.")
+    player_count: Optional[int] = Field(None, description="Parsed number of players this option covers, if it could be extracted from the label.")
+    price: Optional[str] = Field(None, description="Parsed price for this option, if it could be extracted from the label.")
 
 
 class TimeSlot(BaseModel):
-    time: str
-    time_button_id: Optional[str] = None
-    player_options: List[PlayerOption] = []
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "time": "07:30",
+            "time_button_id": "teetime-0730",
+            "player_options": [{"id": "opt-2ball-0730", "label": "2 Players - €180.00", "player_count": 2, "price": "€180.00"}],
+        }
+    })
+
+    time: str = Field(..., description="Tee time, e.g. '07:30'. Pass this straight into `desired_time` on POST /bookings.")
+    time_button_id: Optional[str] = Field(None, description="DOM element id of the time button on the source page.")
+    player_options: List[PlayerOption] = Field(default_factory=list, description="Player-count / price combinations available for this specific time slot.")
 
 
 class RateSection(BaseModel):
-    rate_name: Optional[str] = None
-    times: List[TimeSlot] = []
+    model_config = ConfigDict(json_schema_extra={
+        "example": {"rate_name": "Visitor Rate", "times": []}
+    })
+
+    rate_name: Optional[str] = Field(None, description="Name of the rate/package this group of times belongs to, e.g. 'Visitor Rate'.")
+    times: List[TimeSlot] = Field(default_factory=list, description="Tee times available under this rate.")
 
 
 class AvailableTimesResponse(BaseModel):
-    course_name: str
-    holes: str
-    date: Optional[str] = None
-    date_selected: Optional[bool] = None   # True/False if desired_date was given, None if it wasn't
-    sections: List[RateSection]
-    log: List[str]
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "course_name": "Old Tom Morris Links",
+            "holes": "18 Holes",
+            "date": "2026-07-26",
+            "date_selected": True,
+            "sections": [],
+            "log": ["ok: select course", "ok: found 12 time slot(s) across 1 section(s)"],
+        }
+    })
+
+    course_name: str = Field(..., description="Course this result set is for, echoed back from the request.")
+    holes: str = Field(..., description="Holes option this result set is for, echoed back from the request.")
+    date: Optional[str] = Field(None, description="Date this result set is for, echoed back from the request (may be None if no date was requested).")
+    date_selected: Optional[bool] = Field(None, description="True/False if `desired_date` was supplied and the calendar click was verified to succeed; None if no date was requested at all.")
+    sections: List[RateSection] = Field(..., description="Available tee times grouped by rate/package.")
+    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced while scraping.")
 
 
 # ============================================================
@@ -1433,7 +1570,78 @@ async def lifespan(app: FastAPI):
     logger.info("Shutdown complete.")
 
 
-app = FastAPI(title="Rosapenna Tee Time Booking API", lifespan=lifespan)
+# ============================================================
+# OpenAPI / Swagger metadata
+# ============================================================
+# `tags_metadata` controls the grouping + descriptions shown at the top
+# of each section in Swagger UI (/docs) and ReDoc (/redoc).
+
+tags_metadata = [
+    {
+        "name": "availability",
+        "description": "Read-only endpoints for checking what tee times are currently open. "
+                        "Never touches the booking form — safe to call as often as you like "
+                        "(subject to the rate limit).",
+    },
+    {
+        "name": "bookings",
+        "description": "Endpoints that drive the actual booking automation: opening a real "
+                        "browser, filling in the tee-sheet form, and stopping just short of "
+                        "payment so a human can review and pay.",
+    },
+    {
+        "name": "sessions",
+        "description": "Introspection into currently tracked booking sessions (open browser "
+                        "windows) — useful for admin/debug dashboards.",
+    },
+    {
+        "name": "health",
+        "description": "Unauthenticated liveness/readiness probe, intended for load balancers "
+                        "and systemd/orchestrator health checks.",
+    },
+]
+
+API_DESCRIPTION = """
+Wraps a Playwright browser-automation flow for the Rosapenna (BRS Golf)
+visitor tee-sheet so a booking can be triggered by POSTing JSON instead
+of hand-editing a script.
+
+### How it works
+
+1. `POST /available-times` — headlessly scrapes which tee times are open
+   for a given course/date/hole-count/time-range, without touching the
+   booking form.
+2. `POST /bookings` — opens a **real, visible** Chromium window, walks
+   through course/date/time/player-count selection, and fills in the
+   personal-details form. It **stops before payment** — a human must
+   look at the open browser (directly, or over VNC on a headless VPS)
+   and click "Pay" themselves.
+3. `GET /bookings/{id}` — poll a session's status/log if the initial
+   `POST /bookings` call returned `status: "running"` (i.e. it took
+   longer than `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS` to fill the form).
+4. `POST /bookings/{id}/close` — tell the server it's safe to close that
+   session's browser window once payment is done (or abandoned).
+
+### Authentication
+
+Every route except `/health` requires an `X-API-Key` header matching the
+server's configured `BOOKING_API_KEY`. Use the **Authorize** button in
+Swagger UI to set it once for the whole session.
+
+### Rate limiting
+
+Requests are limited per client IP (`BOOKING_RATE_LIMIT_PER_MINUTE`,
+default 20/minute). Exceeding it returns `429 Too Many Requests`.
+"""
+
+app = FastAPI(
+    title="Rosapenna Tee Time Booking API",
+    description=API_DESCRIPTION,
+    version="1.0.0",
+    contact={"name": "Booking API Maintainer"},
+    openapi_tags=tags_metadata,
+    lifespan=lifespan,
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1454,14 +1662,43 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
 # Routes
 # ============================================================
 
-@app.get("/health")
+@app.get(
+    "/health",
+    tags=["health"],
+    summary="Liveness / readiness probe",
+    description="Returns basic service status and current session load. Does **not** require "
+                "an API key, so it's safe to point a load balancer or systemd watchdog at it.",
+    response_description="Service status plus current vs. maximum concurrent booking sessions.",
+)
 def health():
     with SESSIONS_LOCK:
         active = sum(1 for s in SESSIONS.values() if s.status == "running")
     return {"status": "ok", "active_sessions": active, "max_concurrent_sessions": settings.max_concurrent_sessions}
 
 
-@app.post("/bookings", response_model=BookingResponse, dependencies=COMMON_DEPS)
+@app.post(
+    "/bookings",
+    response_model=BookingResponse,
+    dependencies=COMMON_DEPS,
+    tags=["bookings"],
+    summary="Start a booking automation run",
+    description=(
+        "Launches a real, visible Chromium browser, navigates to the tee sheet, selects the "
+        "course/date/holes/time-range, clicks the requested `desired_time`, chooses the "
+        "player count, and fills in the personal-details form for all players. "
+        "**It never submits payment** — the browser window is left open so a human can review "
+        "the filled form and pay manually (via VNC if running on a headless VPS).\n\n"
+        "The call blocks (up to `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS`, default 90s) waiting "
+        "for the form to finish filling. If it's still running when that timeout elapses, the "
+        "response comes back with `status: \"running\"` — poll `GET /bookings/{session_id}` "
+        "for the final result."
+    ),
+    response_description="The session ID plus current status ('filled', 'error', or 'running') and step-by-step log.",
+    responses={
+        429: {"description": "At capacity — `BOOKING_MAX_CONCURRENT_SESSIONS` browsers are already open, or the per-IP rate limit was exceeded."},
+        401: {"description": "Missing or invalid `X-API-Key` header."},
+    },
+)
 def create_booking(req: BookingRequest):
     session_id = str(uuid.uuid4())
     session = BookingSession(session_id, req)
@@ -1503,7 +1740,24 @@ def create_booking(req: BookingRequest):
     )
 
 
-@app.post("/available-times", response_model=AvailableTimesResponse, dependencies=COMMON_DEPS)
+@app.post(
+    "/available-times",
+    response_model=AvailableTimesResponse,
+    dependencies=COMMON_DEPS,
+    tags=["availability"],
+    summary="List open tee times for a course/date",
+    description=(
+        "Headlessly loads the tee sheet, applies the given course / date / holes / time-range "
+        "filters, and scrapes every visible tee time along with its player-count and price "
+        "options. Read-only — never fills in or submits the booking form. Use the returned "
+        "`time` values directly as `desired_time` in a subsequent `POST /bookings` call."
+    ),
+    response_description="Tee times grouped by rate/package, each with its available player-count/price options.",
+    responses={
+        401: {"description": "Missing or invalid `X-API-Key` header."},
+        500: {"description": "The scrape failed (e.g. site layout changed, selector timeout, or navigation error)."},
+    },
+)
 def get_available_times(req: AvailableTimesRequest):
     try:
         return scrape_available_times(req)
@@ -1512,7 +1766,21 @@ def get_available_times(req: AvailableTimesRequest):
         raise HTTPException(status_code=500, detail=f"Failed to fetch available times: {e}")
 
 
-@app.get("/bookings/{session_id}", response_model=SessionStatusResponse, dependencies=COMMON_DEPS)
+@app.get(
+    "/bookings/{session_id}",
+    response_model=SessionStatusResponse,
+    dependencies=COMMON_DEPS,
+    tags=["bookings"],
+    summary="Poll a booking session's status",
+    description="Fetch the current status and full step-by-step log for a booking session "
+                "created via `POST /bookings`. Use this to poll when the initial call returned "
+                "`status: \"running\"`.",
+    response_description="Current status ('running', 'filled', 'error', or 'closed'), creation time, log, and error (if any).",
+    responses={
+        404: {"description": "No session found with that ID (never existed, or already reaped after closing)."},
+        401: {"description": "Missing or invalid `X-API-Key` header."},
+    },
+)
 def get_booking_status(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
@@ -1526,7 +1794,20 @@ def get_booking_status(session_id: str):
     )
 
 
-@app.post("/bookings/{session_id}/close", dependencies=COMMON_DEPS)
+@app.post(
+    "/bookings/{session_id}/close",
+    tags=["bookings"],
+    summary="Close a booking session's browser",
+    description="Signals the background thread to close that session's Chromium window. "
+                "Call this once payment has been completed manually (or abandoned) so the "
+                "browser and its resources are freed up promptly rather than waiting for the "
+                "session TTL to expire.",
+    response_description="Acknowledgement that the close request was received.",
+    responses={
+        404: {"description": "No session found with that ID."},
+        401: {"description": "Missing or invalid `X-API-Key` header."},
+    },
+)
 def close_booking(session_id: str):
     session = SESSIONS.get(session_id)
     if not session:
@@ -1535,7 +1816,15 @@ def close_booking(session_id: str):
     return {"session_id": session_id, "message": "Close requested; browser will shut down shortly."}
 
 
-@app.get("/sessions", dependencies=COMMON_DEPS)
+@app.get(
+    "/sessions",
+    tags=["sessions"],
+    summary="List all tracked booking sessions",
+    description="Admin/debug endpoint returning every booking session currently held in "
+                "memory (not yet reaped), regardless of status.",
+    response_description="List of sessions with their ID, status, creation time, and error (if any).",
+    responses={401: {"description": "Missing or invalid `X-API-Key` header."}},
+)
 def list_sessions():
     with SESSIONS_LOCK:
         return [
