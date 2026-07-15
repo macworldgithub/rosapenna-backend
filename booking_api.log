@@ -1,0 +1,1566 @@
+2026-07-14 10:31:57,739 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-14 10:31:57,740 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-14 10:31:57,740 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-14 10:36:01,261 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-14 10:36:01,262 INFO [booking_api] Shutdown complete.
+2026-07-14 10:39:34,123 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-14 10:39:34,123 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-14 10:39:34,125 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-14 10:39:48,062 INFO [booking_api] [available-times] Loading page...
+2026-07-14 10:39:50,179 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 10:39:50,630 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 10:40:20,765 INFO [booking_api] [available-times]   ! Date picker automation failed, leaving default date: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("[aria-label*='calendar' i], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-14 10:40:20,766 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 10:40:28,904 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7985ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 10:40:28,905 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 10:40:37,030 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7969ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 10:40:37,031 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 10:40:37,080 INFO [booking_api] [available-times]   ok: found 26 time slot(s) across 2 section(s)
+2026-07-14 11:50:46,225 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-14 11:50:46,230 INFO [booking_api] Shutdown complete.
+2026-07-14 11:50:53,238 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-14 11:50:53,238 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-14 11:50:53,240 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-14 11:52:05,206 INFO [booking_api] [available-times] Loading page...
+2026-07-14 11:52:08,140 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 11:52:08,562 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 11:52:08,563 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 11:52:16,699 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7986ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:52:16,700 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 11:52:24,819 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7987ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:52:24,820 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 11:52:24,842 INFO [booking_api] [available-times]   ok: found 22 time slot(s) across 2 section(s)
+2026-07-14 11:53:15,829 INFO [booking_api] [available-times] Loading page...
+2026-07-14 11:53:20,791 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 11:53:20,962 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 11:53:20,963 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-14 11:53:43,142 INFO [booking_api] [available-times] Loading page...
+2026-07-14 11:53:45,534 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 11:53:45,973 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 11:53:45,974 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-14 11:53:51,022 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-14 11:53:51,022 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 11:53:59,043 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7987ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:53:59,043 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 11:54:07,059 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:54:07,059 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 11:54:07,073 INFO [booking_api] [available-times]   ok: found 22 time slot(s) across 2 section(s)
+2026-07-14 11:54:16,095 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-14 11:54:16,095 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 11:54:24,228 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7989ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:54:24,228 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 11:54:32,348 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:54:32,349 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 11:54:32,367 INFO [booking_api] [available-times]   ok: found 22 time slot(s) across 2 section(s)
+2026-07-14 11:55:16,115 INFO [booking_api] [available-times] Loading page...
+2026-07-14 11:55:19,629 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 11:55:20,135 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 11:55:20,135 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-14 11:55:50,259 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    58 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-14 11:55:50,260 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 11:55:58,382 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7990ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:55:58,383 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 11:56:06,508 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7985ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:56:06,509 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 11:56:06,524 INFO [booking_api] [available-times]   ok: found 22 time slot(s) across 2 section(s)
+2026-07-14 11:56:40,232 INFO [booking_api] [available-times] Loading page...
+2026-07-14 11:56:43,457 INFO [booking_api] [available-times] Selecting course...
+2026-07-14 11:56:43,882 INFO [booking_api] [available-times]   ok: select course
+2026-07-14 11:56:43,891 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-14 11:57:14,013 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-14 11:57:14,014 INFO [booking_api] [available-times] Selecting holes...
+2026-07-14 11:57:22,148 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:57:22,149 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-14 11:57:30,271 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-14 11:57:30,271 INFO [booking_api] [available-times] Scraping available times...
+2026-07-14 11:57:30,290 INFO [booking_api] [available-times]   ok: found 22 time slot(s) across 2 section(s)
+2026-07-15 11:23:36,156 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-15 11:23:36,157 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-15 11:23:36,158 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-15 11:25:03,443 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:25:06,335 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:25:06,973 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:25:06,975 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:25:37,121 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-15 11:25:37,122 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:25:45,270 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7980ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:25:45,271 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:25:53,396 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7914ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:25:53,397 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:25:53,427 INFO [booking_api] [available-times]   ok: found 34 time slot(s) across 2 section(s)
+2026-07-15 11:27:30,465 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:27:33,332 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:27:34,200 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:27:34,200 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:28:04,323 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-15 11:28:04,324 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:28:12,451 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7970ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:28:12,452 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:28:20,569 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7971ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:28:20,569 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:28:20,612 INFO [booking_api] [available-times]   ok: found 36 time slot(s) across 2 section(s)
+2026-07-15 11:33:05,066 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:33:10,154 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:33:10,529 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:33:10,547 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:33:40,792 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-15 11:33:40,792 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:33:48,928 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7980ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:33:48,929 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:33:57,056 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7974ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:33:57,057 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:33:57,089 INFO [booking_api] [available-times]   ok: found 40 time slot(s) across 2 section(s)
+2026-07-15 11:34:02,933 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:34:07,691 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:34:08,405 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:34:08,418 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:34:38,551 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-15 11:34:38,552 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:34:46,692 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7975ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:34:46,693 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:34:54,814 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7970ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:34:54,815 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:34:54,858 INFO [booking_api] [available-times]   ok: found 40 time slot(s) across 2 section(s)
+2026-07-15 11:35:26,010 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:35:29,850 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:35:30,302 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:35:30,310 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:36:00,445 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+    - waiting for element to be visible, enabled and stable
+
+2026-07-15 11:36:00,445 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:36:08,579 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:36:08,580 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:36:16,705 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7971ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:36:16,706 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:36:16,736 INFO [booking_api] [available-times]   ok: found 34 time slot(s) across 2 section(s)
+2026-07-15 11:37:07,108 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:37:10,353 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:37:10,863 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:37:10,864 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:37:41,000 INFO [booking_api] [available-times]   ! Could not open date picker: Locator.click: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#desktop-teesheet-filter-datepicker, input[readonly][id*='datepicker'], .calendar, input[type='text']").first
+    - locator resolved to <input type="text" data-v-1ad2436f="" readonly="readonly" placeholder="Select date" class="input is-radiusless pointer" id="mobile-teesheet-filter-datepicker"/>
+  - attempting click action
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+    - waiting 20ms
+    2 × waiting for element to be visible, enabled and stable
+      - element is not visible
+    - retrying click action
+      - waiting 100ms
+    57 × waiting for element to be visible, enabled and stable
+       - element is not visible
+     - retrying click action
+       - waiting 500ms
+
+2026-07-15 11:37:41,001 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:37:49,132 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7980ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:37:49,133 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:37:57,263 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7980ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:37:57,263 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:37:57,323 INFO [booking_api] [available-times]   ok: found 34 time slot(s) across 2 section(s)
+2026-07-15 11:47:38,386 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-15 11:47:38,386 INFO [booking_api] Shutdown complete.
+2026-07-15 11:47:42,152 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-15 11:47:42,153 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-15 11:47:42,155 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-15 11:47:51,678 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:47:54,393 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:47:54,888 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:47:54,889 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:48:00,275 INFO [booking_api] [available-times]   ! (attempt 1) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    14 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:48:05,434 INFO [booking_api] [available-times]   ! (attempt 2) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    14 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:48:10,591 INFO [booking_api] [available-times]   ! (attempt 3) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    14 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:48:10,591 INFO [booking_api] [available-times]   ! FAILED to select 2026-07-26 after 3 attempts. The search that follows will run against whatever date the site currently shows (likely today). Re-run with debug=True, headless=False and check the *_calendar_state_*.json dumps to see what the geometry heuristic found.
+2026-07-15 11:48:10,592 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:48:18,726 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7984ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:48:18,726 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:48:26,867 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7982ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:48:26,867 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:48:26,905 INFO [booking_api] [available-times]   ok: found 32 time slot(s) across 2 section(s)
+2026-07-15 11:48:53,466 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:48:56,246 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:48:56,690 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:48:56,691 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:49:01,970 INFO [booking_api] [available-times]   ! (attempt 1) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    14 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:49:07,129 INFO [booking_api] [available-times]   ! (attempt 2) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    14 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:49:12,295 INFO [booking_api] [available-times]   ! (attempt 3) Could not open date picker: Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin, .popover-container") to be visible
+    13 × locator resolved to 46 elements. Proceeding with the first one: <div tabindex="-1" data-v-1ad2436f="" class="popover-container">…</div>
+
+2026-07-15 11:49:12,296 INFO [booking_api] [available-times]   ! FAILED to select 2026-07-26 after 3 attempts. The search that follows will run against whatever date the site currently shows (likely today). Re-run with debug=True, headless=False and check the *_calendar_state_*.json dumps to see what the geometry heuristic found.
+2026-07-15 11:49:12,296 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:49:20,420 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7983ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:49:20,421 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:49:28,541 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7974ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:49:28,541 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:49:28,578 INFO [booking_api] [available-times]   ok: found 32 time slot(s) across 2 section(s)
+2026-07-15 11:51:57,433 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-15 11:51:57,434 INFO [booking_api] Shutdown complete.
+2026-07-15 11:52:01,426 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-15 11:52:01,437 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-15 11:52:01,439 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-15 11:52:14,359 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:52:16,978 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:52:17,618 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:52:17,618 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:52:19,085 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 11:52:19,085 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:52:27,219 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7985ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:52:27,219 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:52:35,334 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7987ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:52:35,334 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:52:35,344 INFO [booking_api] [available-times]   ok: found 4 time slot(s) across 2 section(s)
+2026-07-15 11:53:15,852 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:53:28,027 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1296, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1104, in scrape_available_times
+    page.goto(req.url, wait_until="domcontentloaded", timeout=30000)
+    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 9770, in goto
+    self._sync(
+    ~~~~~~~~~~^
+        self._impl_obj.goto(
+        ^^^^^^^^^^^^^^^^^^^^
+    ...<4 lines>...
+        )
+        ^
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_page.py", line 560, in goto
+    return await self._main_frame.goto(**locals_to_params(locals()))
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 156, in goto
+    await self._channel.send(
+        "goto", self._navigation_timeout, locals_to_params(locals())
+    )
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.Error: Page.goto: net::ERR_NAME_NOT_RESOLVED at https://visitors.brsgolf.com/rosapenna#/course/1
+Call log:
+  - navigating to "https://visitors.brsgolf.com/rosapenna#/course/1", waiting until "domcontentloaded"
+
+2026-07-15 11:53:52,498 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:53:54,970 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:53:55,509 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:53:55,509 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:53:56,830 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 11:53:56,830 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:54:04,962 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7992ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:54:04,963 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:54:05,924 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    - waiting for element to be stable
+    - element is not visible
+  - retrying scroll into view action
+    - waiting 500ms
+
+2026-07-15 11:54:05,924 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:54:06,552 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1296, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1132, in scrape_available_times
+    raw_sections = page.evaluate(SCRAPE_TIMES_JS)
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 9280, in evaluate
+    self._sync(
+    ~~~~~~~~~~^
+        self._impl_obj.evaluate(expression=expression, arg=mapping.to_impl(arg))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_page.py", line 472, in evaluate
+    return await self._main_frame.evaluate(expression, arg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 345, in evaluate
+    await self._channel.send(
+    ...<6 lines>...
+    )
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Page.evaluate: Target page, context or browser has been closed
+2026-07-15 11:54:08,596 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:54:10,615 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:54:11,037 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:54:11,037 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:54:12,389 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 11:54:12,389 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:54:13,891 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 500ms
+
+2026-07-15 11:54:13,917 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:54:13,925 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+2026-07-15 11:54:13,928 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:54:14,264 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1296, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1157, in scrape_available_times
+    browser.close()
+    ~~~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 16238, in close
+    return mapping.from_maybe_impl(self._sync(self._impl_obj.close(reason=reason)))
+                                   ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_browser.py", line 244, in close
+    raise e
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_browser.py", line 241, in close
+    await self._channel.send("close", None, {"reason": reason})
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+Exception: Browser.close: Connection closed while reading from the driver
+2026-07-15 11:54:16,531 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-15 11:54:16,531 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-15 11:54:16,532 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-15 11:54:24,167 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:54:27,517 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:54:28,162 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:54:28,167 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 11:54:29,606 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 11:54:29,606 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:54:37,750 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7992ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:54:37,751 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:54:45,883 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7989ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:54:45,884 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:54:45,895 INFO [booking_api] [available-times]   ok: found 4 time slot(s) across 2 section(s)
+2026-07-15 11:54:51,524 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:54:53,632 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:54:54,000 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:54:54,000 INFO [booking_api] [available-times] Selecting date 2026-07-28...
+2026-07-15 11:54:55,265 INFO [booking_api] [available-times]   ok: selected date 2026-07-28 (input now reads 'Tuesday 28th July')
+2026-07-15 11:54:55,265 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:55:00,457 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    9 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 500ms
+
+2026-07-15 11:55:00,458 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:55:00,461 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+2026-07-15 11:55:00,461 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:55:01,017 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1296, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1132, in scrape_available_times
+    raw_sections = page.evaluate(SCRAPE_TIMES_JS)
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 9280, in evaluate
+    self._sync(
+    ~~~~~~~~~~^
+        self._impl_obj.evaluate(expression=expression, arg=mapping.to_impl(arg))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_page.py", line 472, in evaluate
+    return await self._main_frame.evaluate(expression, arg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 345, in evaluate
+    await self._channel.send(
+    ...<6 lines>...
+    )
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Page.evaluate: Target page, context or browser has been closed
+2026-07-15 11:55:06,159 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:55:08,225 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:55:08,625 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:55:08,625 INFO [booking_api] [available-times] Selecting date 2026-07-28...
+2026-07-15 11:55:09,898 INFO [booking_api] [available-times]   ok: selected date 2026-07-28 (input now reads 'Tuesday 28th July')
+2026-07-15 11:55:09,898 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:55:18,028 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7986ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:55:18,029 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:55:26,158 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7981ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:55:26,158 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:55:26,178 INFO [booking_api] [available-times]   ok: found 36 time slot(s) across 2 section(s)
+2026-07-15 11:55:43,748 INFO [booking_api] [available-times] Loading page...
+2026-07-15 11:55:47,773 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 11:55:48,123 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 11:55:48,123 INFO [booking_api] [available-times] Selecting date 2026-07-28...
+2026-07-15 11:55:49,485 INFO [booking_api] [available-times]   ok: selected date 2026-07-28 (input now reads 'Tuesday 28th July')
+2026-07-15 11:55:49,485 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 11:55:57,620 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7984ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:55:57,620 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 11:56:05,739 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7987ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 11:56:05,739 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 11:56:05,765 INFO [booking_api] [available-times]   ok: found 36 time slot(s) across 2 section(s)
+2026-07-15 11:59:54,568 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:00:00,536 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:00:00,888 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:00:00,889 INFO [booking_api] [available-times] Selecting date 2026-07-28...
+2026-07-15 12:00:02,259 INFO [booking_api] [available-times]   ok: selected date 2026-07-28 (input now reads 'Tuesday 28th July')
+2026-07-15 12:00:02,264 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:00:10,403 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7991ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:00:10,404 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:00:18,536 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7975ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:00:18,536 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:00:18,569 INFO [booking_api] [available-times]   ok: found 36 time slot(s) across 2 section(s)
+2026-07-15 12:21:44,731 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-15 12:21:44,731 INFO [booking_api] Shutdown complete.
+2026-07-15 12:21:47,792 INFO [booking_api] Starting up: max_concurrent_sessions=3, ttl=1800s
+2026-07-15 12:21:47,792 WARNING [booking_api] BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.
+2026-07-15 12:21:47,793 WARNING [booking_api] Could not start virtual display (install xvfb + pyvirtualdisplay for headed browsers on a VPS with no monitor): No module named 'pyvirtualdisplay'
+2026-07-15 12:22:05,547 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:22:09,047 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:22:09,648 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:22:09,649 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:22:10,977 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 12:22:10,978 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:22:12,137 INFO [booking_api] [available-times]   ok: dragged earliest time handle toward 07:00
+2026-07-15 12:22:13,342 INFO [booking_api] [available-times]   ok: dragged latest time handle toward 15:00
+2026-07-15 12:22:13,363 INFO [booking_api] [available-times]   ok: time range now 07:00 - 15:00
+2026-07-15 12:22:13,364 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:22:21,496 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7990ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:22:21,496 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:22:29,632 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7989ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:22:29,633 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:22:29,648 INFO [booking_api] [available-times]   ok: found 2 time slot(s) across 2 section(s)
+2026-07-15 12:23:03,832 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:23:05,872 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:23:06,210 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:23:06,214 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:23:11,686 INFO [booking_api] [available-times]   ! (attempt 1) Popup did not open after clicking date input ('.popover-origin' never appeared): Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin") to be visible
+
+2026-07-15 12:23:16,833 INFO [booking_api] [available-times]   ! (attempt 2) Popup did not open after clicking date input ('.popover-origin' never appeared): Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin") to be visible
+
+2026-07-15 12:23:19,914 INFO [booking_api] [available-times]   ! (attempt 3) Popup did not open after clicking date input ('.popover-origin' never appeared): Page.wait_for_selector: Target page, context or browser has been closed
+Call log:
+  - waiting for locator(".popover-origin") to be visible
+
+2026-07-15 12:23:19,979 INFO [booking_api] [available-times]   ! FAILED to select 2026-07-26 after 3 attempts. The search that follows will run against whatever date the site currently shows (likely today). Re-run with debug=True, headless=False and check the *_calendar_state_*.json dumps to see what the geometry heuristic found.
+2026-07-15 12:23:19,988 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:23:19,992 INFO [booking_api] [available-times]   ! Could not find the time-range slider rail: Locator.bounding_box: Target page, context or browser has been closed
+2026-07-15 12:23:20,032 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:23:20,539 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1509, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1336, in scrape_available_times
+    if holes_locator.count() == 0:
+       ~~~~~~~~~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 18941, in count
+    return mapping.from_maybe_impl(self._sync(self._impl_obj.count()))
+                                   ~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_locator.py", line 426, in count
+    return await self._frame._query_count(self._selector)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 139, in _query_count
+    return await self._channel.send("queryCount", None, {"selector": selector})
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Locator.count: Target page, context or browser has been closed
+2026-07-15 12:23:37,002 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:23:39,193 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:23:39,622 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:23:39,623 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:23:40,973 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 12:23:40,973 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:23:42,168 INFO [booking_api] [available-times]   ok: dragged earliest time handle toward 07:00
+2026-07-15 12:23:43,280 INFO [booking_api] [available-times]   ok: dragged latest time handle toward 15:00
+2026-07-15 12:23:43,326 INFO [booking_api] [available-times]   ok: time range now 07:00 - 15:00
+2026-07-15 12:23:43,326 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:23:51,458 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7991ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:23:51,459 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:23:59,589 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7975ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:23:59,589 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:23:59,594 INFO [booking_api] [available-times]   ok: found 2 time slot(s) across 2 section(s)
+2026-07-15 12:24:22,936 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:24:24,791 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:24:25,141 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:24:25,164 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:24:25,986 INFO [booking_api] [available-times]   ! (attempt 1) calendar inspect: no month/year header text found in popup
+2026-07-15 12:24:25,987 INFO [booking_api] [available-times]   [debug] dumped calendar state to debug_available_times_calendar_state_attempt1_inspect_error.json
+2026-07-15 12:24:25,988 INFO [booking_api] [available-times]   ! (attempt 1) Gave up navigating calendar to July 2026
+2026-07-15 12:24:31,143 INFO [booking_api] [available-times]   ! (attempt 2) Popup did not open after clicking date input ('.popover-origin' never appeared): Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin") to be visible
+
+2026-07-15 12:24:36,288 INFO [booking_api] [available-times]   ! (attempt 3) Popup did not open after clicking date input ('.popover-origin' never appeared): Page.wait_for_selector: Timeout 5000ms exceeded.
+Call log:
+  - waiting for locator(".popover-origin") to be visible
+
+2026-07-15 12:24:36,289 INFO [booking_api] [available-times]   ! FAILED to select 2026-07-26 after 3 attempts. The search that follows will run against whatever date the site currently shows (likely today). Re-run with debug=True, headless=False and check the *_calendar_state_*.json dumps to see what the geometry heuristic found.
+2026-07-15 12:24:36,289 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:24:37,461 INFO [booking_api] [available-times]   ok: dragged earliest time handle toward 07:00
+2026-07-15 12:24:38,631 INFO [booking_api] [available-times]   ok: dragged latest time handle toward 15:00
+2026-07-15 12:24:38,678 INFO [booking_api] [available-times]   ok: time range now 07:00 - 15:00
+2026-07-15 12:24:38,679 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:24:43,003 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    8 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 500ms
+
+2026-07-15 12:24:43,003 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:24:43,007 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+2026-07-15 12:24:43,007 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:24:43,402 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1509, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1345, in scrape_available_times
+    raw_sections = page.evaluate(SCRAPE_TIMES_JS)
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 9280, in evaluate
+    self._sync(
+    ~~~~~~~~~~^
+        self._impl_obj.evaluate(expression=expression, arg=mapping.to_impl(arg))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_page.py", line 472, in evaluate
+    return await self._main_frame.evaluate(expression, arg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 345, in evaluate
+    await self._channel.send(
+    ...<6 lines>...
+    )
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Page.evaluate: Target page, context or browser has been closed
+2026-07-15 12:24:47,144 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:24:49,236 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:24:49,768 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:24:49,768 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:24:51,093 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 12:24:51,093 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:24:52,296 INFO [booking_api] [available-times]   ok: dragged earliest time handle toward 07:00
+2026-07-15 12:24:53,425 INFO [booking_api] [available-times]   ok: dragged latest time handle toward 15:00
+2026-07-15 12:24:53,456 INFO [booking_api] [available-times]   ok: time range now 07:00 - 15:00
+2026-07-15 12:24:53,456 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:24:56,328 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    5 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 500ms
+
+2026-07-15 12:24:56,328 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:24:56,330 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Target page, context or browser has been closed
+2026-07-15 12:24:56,330 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:24:56,760 ERROR [booking_api] available-times scrape failed
+Traceback (most recent call last):
+  File "D:\razapena\rosapenna-backend\app.py", line 1509, in get_available_times
+    return scrape_available_times(req)
+  File "D:\razapena\rosapenna-backend\app.py", line 1345, in scrape_available_times
+    raw_sections = page.evaluate(SCRAPE_TIMES_JS)
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\sync_api\_generated.py", line 9280, in evaluate
+    self._sync(
+    ~~~~~~~~~~^
+        self._impl_obj.evaluate(expression=expression, arg=mapping.to_impl(arg))
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_sync_base.py", line 115, in _sync
+    return task.result()
+           ~~~~~~~~~~~^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_page.py", line 472, in evaluate
+    return await self._main_frame.evaluate(expression, arg)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_frame.py", line 345, in evaluate
+    await self._channel.send(
+    ...<6 lines>...
+    )
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 69, in send
+    return await self._connection.wrap_api_call(
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    ...<3 lines>...
+    )
+    ^
+  File "D:\razapena\rosapenna-backend\env\Lib\site-packages\playwright\_impl\_connection.py", line 563, in wrap_api_call
+    raise rewrite_error(error, f"{parsed_st['apiName']}: {error}") from None
+playwright._impl._errors.TargetClosedError: Page.evaluate: Target page, context or browser has been closed
+2026-07-15 12:25:00,448 INFO [booking_api] [available-times] Loading page...
+2026-07-15 12:25:02,523 INFO [booking_api] [available-times] Selecting course...
+2026-07-15 12:25:02,890 INFO [booking_api] [available-times]   ok: select course
+2026-07-15 12:25:02,892 INFO [booking_api] [available-times] Selecting date 2026-07-26...
+2026-07-15 12:25:04,193 INFO [booking_api] [available-times]   ok: selected date 2026-07-26 (input now reads 'Sunday 26th July')
+2026-07-15 12:25:04,193 INFO [booking_api] [available-times] Setting time range 07:00 - 15:00...
+2026-07-15 12:25:05,310 INFO [booking_api] [available-times]   ok: dragged earliest time handle toward 07:00
+2026-07-15 12:25:06,463 INFO [booking_api] [available-times]   ok: dragged latest time handle toward 15:00
+2026-07-15 12:25:06,503 INFO [booking_api] [available-times]   ok: time range now 07:00 - 15:00
+2026-07-15 12:25:06,504 INFO [booking_api] [available-times] Selecting holes...
+2026-07-15 12:25:14,640 INFO [booking_api] [available-times]   ! FAILED: select holes -> Locator.scroll_into_view_if_needed: Timeout 7987ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:25:14,641 INFO [booking_api] [available-times] Refreshing tee times...
+2026-07-15 12:25:22,772 INFO [booking_api] [available-times]   ! FAILED: refresh tee times -> Locator.scroll_into_view_if_needed: Timeout 7979ms exceeded.
+Call log:
+  - attempting scroll into view action
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+    - waiting 20ms
+    2 × waiting for element to be stable
+      - element is not visible
+    - retrying scroll into view action
+      - waiting 100ms
+    15 × waiting for element to be stable
+       - element is not visible
+     - retrying scroll into view action
+       - waiting 500ms
+
+2026-07-15 12:25:22,773 INFO [booking_api] [available-times] Scraping available times...
+2026-07-15 12:25:22,777 INFO [booking_api] [available-times]   ok: found 2 time slot(s) across 2 section(s)
+2026-07-15 12:37:52,096 INFO [booking_api] Shutting down: closing all open sessions...
+2026-07-15 12:37:52,097 INFO [booking_api] Shutdown complete.
