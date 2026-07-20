@@ -31,6 +31,10 @@ full interactive Swagger / ReDoc documentation:
     useful, not just auto-generated stubs. Every request/response model
     field carries a `description` and a realistic `example`, so the
     "Try it out" panel in Swagger is pre-filled with sensible values.
+  * Stripe card filling: card number, expiry and CVV are typed into the
+    Stripe iframe by simulating keyboard input after clicking the element,
+    since the iframe is cross-origin and cannot be filled via Playwright's
+    normal fill() API.
 
 ------------------------------------------------------------------------
 INSTALL (Ubuntu/Debian VPS)
@@ -45,80 +49,26 @@ INSTALL (Ubuntu/Debian VPS)
 ------------------------------------------------------------------------
 CONFIGURE (environment variables, all optional, prefix BOOKING_)
 ------------------------------------------------------------------------
-    BOOKING_API_KEY=some-long-random-string     # REQUIRED in practice — protects every endpoint
+    BOOKING_API_KEY=some-long-random-string     # REQUIRED in practice
     BOOKING_HOST=0.0.0.0
     BOOKING_PORT=4040
-    BOOKING_MAX_CONCURRENT_SESSIONS=3           # cap on simultaneous open browsers
-    BOOKING_SESSION_TTL_SECONDS=1800            # auto-close browsers after this long
+    BOOKING_MAX_CONCURRENT_SESSIONS=3
+    BOOKING_SESSION_TTL_SECONDS=1800
     BOOKING_SESSION_REAP_INTERVAL_SECONDS=60
-    BOOKING_BOOKING_FILL_TIMEOUT_SECONDS=90     # how long /bookings blocks waiting for form-fill
+    BOOKING_BOOKING_FILL_TIMEOUT_SECONDS=90
     BOOKING_LOG_LEVEL=INFO
     BOOKING_LOG_FILE=booking_api.log
-    BOOKING_CORS_ORIGINS=*                      # comma-separated list, or *
+    BOOKING_CORS_ORIGINS=*
     BOOKING_RATE_LIMIT_PER_MINUTE=20
-    BOOKING_USE_VIRTUAL_DISPLAY=true            # auto-start Xvfb if no DISPLAY
-    BOOKING_ENABLE_VNC=false                    # auto-start x11vnc on the virtual display
+    BOOKING_USE_VIRTUAL_DISPLAY=true
+    BOOKING_ENABLE_VNC=false
     BOOKING_VNC_PORT=5900
-    BOOKING_VNC_PASSWORD=                       # leave empty for -nopw (fine behind a firewall/SSH tunnel)
-
-You can put these in a `.env` file next to this script instead.
+    BOOKING_VNC_PASSWORD=
 
 ------------------------------------------------------------------------
 RUN
 ------------------------------------------------------------------------
     uvicorn app:app --host 0.0.0.0 --port 4040 --workers 1
-
-IMPORTANT: always run with exactly 1 worker process. Session state and
-the concurrency semaphore live in this process's memory; multiple
-workers would each think they have their own quota and you'd lose track
-of sessions created by sibling workers.
-
-For a real deployment, run it under systemd so it restarts on crash/boot.
-Example unit file (save as /etc/systemd/system/booking-api.service):
-
-    [Unit]
-    Description=Rosapenna Booking API
-    After=network.target
-
-    [Service]
-    Type=simple
-    User=booking
-    WorkingDirectory=/opt/booking-api
-    EnvironmentFile=/opt/booking-api/.env
-    ExecStart=/opt/booking-api/venv/bin/uvicorn app:app --host 0.0.0.0 --port 4040 --workers 1
-    Restart=on-failure
-    RestartSec=5
-
-    [Install]
-    WantedBy=multi-user.target
-
-Then: sudo systemctl daemon-reload && sudo systemctl enable --now booking-api
-
-------------------------------------------------------------------------
-USING IT / DOCS
-------------------------------------------------------------------------
-Every request needs a header:  X-API-Key: <your BOOKING_API_KEY>
-
-Interactive documentation is auto-served once the app is running:
-
-    Swagger UI:  http://<host>:<port>/docs
-    ReDoc:       http://<host>:<port>/redoc
-    Raw schema:  http://<host>:<port>/openapi.json
-
-Routes:
-
-    POST /available-times   { "course_name": "...", "holes": "18 Holes", "desired_date": "2026-07-26",
-                              "earliest_time": "07:00", "latest_time": "15:00" }
-    POST /bookings           { ... full booking payload ... }
-    GET  /bookings/{id}      poll status
-    POST /bookings/{id}/close
-    GET  /sessions           list all sessions (admin/debug)
-    GET  /health             no auth required, for load balancers / systemd
-
-If BOOKING_ENABLE_VNC=true, connect a VNC client to <vps-ip>:5900 (ideally
-through an SSH tunnel: `ssh -L 5900:localhost:5900 user@vps`, then point
-your VNC viewer at localhost:5900) to see and interact with the booking
-browser window in real time and complete payment.
 """
 
 import logging
@@ -212,12 +162,12 @@ if not logger.handlers:
         _file = RotatingFileHandler(settings.log_file, maxBytes=10 * 1024 * 1024, backupCount=5)
         _file.setFormatter(_fmt)
         logger.addHandler(_file)
-    except Exception as e:  # e.g. unwritable path — don't crash, just warn to console
+    except Exception as e:
         logger.warning("Could not attach file log handler (%s): %s", settings.log_file, e)
 
 
 # ============================================================
-# Virtual display + VNC (so a "headed" browser works on a VPS)
+# Virtual display + VNC
 # ============================================================
 
 _display_handle = None
@@ -289,10 +239,6 @@ def stop_vnc_server():
 # ============================================================
 # Request / response models
 # ============================================================
-# Every field below carries a `description` (shown in Swagger's schema
-# panel) and, where useful, an `example` — Pydantic v2 folds field-level
-# examples into the generated JSON Schema, which Swagger UI then uses to
-# pre-populate the "Try it out" request body editor.
 
 class PersonalInfo(BaseModel):
     model_config = ConfigDict(json_schema_extra={
@@ -310,16 +256,16 @@ class PersonalInfo(BaseModel):
         }
     })
 
-    first_name: str = Field(..., description="Golfer's first name, as it should appear on the booking.")
+    first_name: str = Field(..., description="Golfer's first name.")
     last_name: str = Field(..., description="Golfer's last (family) name.")
-    country: str = Field(..., description="Country of residence, matched against the site's country dropdown by visible label.")
-    email: str = Field(..., description="Contact email address for the booking confirmation.")
-    telephone: str = Field(..., description="Primary telephone number, including country code if available.")
-    mobile: Optional[str] = Field("", description="Mobile number, if different from the telephone field. Optional.")
+    country: str = Field(..., description="Country of residence, matched against the site's country dropdown.")
+    email: str = Field(..., description="Contact email address.")
+    telephone: str = Field(..., description="Primary telephone number, including country code.")
+    mobile: Optional[str] = Field("", description="Mobile number, if different from telephone. Optional.")
     handicap: str = Field(..., description="Official golf handicap index, e.g. '14.2'.")
     club: str = Field(..., description="Home golf club name.")
-    cdh_number: Optional[str] = Field("", description="CDH (Club/Deputy Handicap) reference number, if applicable. Optional.")
-    special_requirements: Optional[str] = Field("", description="Free-text notes for the course (dietary, mobility, etc). Optional.")
+    cdh_number: Optional[str] = Field("", description="CDH reference number. Optional.")
+    special_requirements: Optional[str] = Field("", description="Free-text notes for the course. Optional.")
 
 
 class AdditionalPlayer(BaseModel):
@@ -332,10 +278,10 @@ class AdditionalPlayer(BaseModel):
         }
     })
 
-    name: str = Field(..., description="Full name of the additional player (players 2-4 on the booking).")
+    name: str = Field(..., description="Full name of the additional player.")
     handicap: str = Field(..., description="This player's golf handicap index.")
     club: str = Field(..., description="This player's home golf club.")
-    cdh_number: Optional[str] = Field("", description="This player's CDH reference number, if applicable. Optional.")
+    cdh_number: Optional[str] = Field("", description="This player's CDH reference number. Optional.")
 
 
 class MarketingConsent(BaseModel):
@@ -347,6 +293,20 @@ class MarketingConsent(BaseModel):
     sms: bool = Field(False, description="Opt in to marketing SMS messages.")
     post: bool = Field(False, description="Opt in to marketing by post.")
     telephone: bool = Field(False, description="Opt in to marketing phone calls.")
+
+
+class CardDetails(BaseModel):
+    model_config = ConfigDict(json_schema_extra={
+        "example": {
+            "card_number": "4242424242424242",
+            "expiry": "1228",
+            "cvv": "123",
+        }
+    })
+
+    card_number: str = Field(..., description="Card number digits only, no spaces, e.g. '4242424242424242'.")
+    expiry: str = Field(..., description="Expiry as MMYY, e.g. '1228' for Dec 2028.")
+    cvv: str = Field(..., description="3 or 4 digit CVV/CVC.")
 
 
 class BookingRequest(BaseModel):
@@ -377,23 +337,38 @@ class BookingRequest(BaseModel):
             ],
             "marketing_consent": {"email": True, "sms": False, "post": False, "telephone": False},
             "accept_terms": True,
+            "card_details": {
+                "card_number": "4242424242424242",
+                "expiry": "1228",
+                "cvv": "123",
+            },
+            "auto_pay": False,
             "debug": True,
         }
     })
 
-    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page to book from.")
-    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site, e.g. 'Old Tom Morris Links' or 'Sandy Hills Links'.")
+    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page.")
+    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site.")
     holes: str = Field("18 Holes", description="Holes option label, e.g. '18 Holes' or '9 Holes'.")
-    desired_date: Optional[str] = Field(None, description="Date to book, formatted 'YYYY-MM-DD'. Omit to leave the site's default (usually today).")
-    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider's left handle. Omit to leave it at its default.")
-    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider's right handle. Omit to leave it at its default.")
-    desired_time: str = Field(..., description="The exact tee time to book. Must exactly match a visible time button, e.g. '07:30'.")
-    player_count: int = Field(1, description="Number of players on the booking (1-4). Additional players beyond the first must be supplied in `additional_players`.")
-    personal_info: PersonalInfo = Field(..., description="Contact/lead player details used to fill the personal information section of the form.")
-    additional_players: List[AdditionalPlayer] = Field(default_factory=list, description="Details for players 2, 3, 4 — supply one entry per additional player, in order.")
-    marketing_consent: MarketingConsent = Field(default_factory=MarketingConsent, description="Which marketing consent checkboxes to tick. Anything omitted defaults to unchecked.")
-    accept_terms: bool = Field(True, description="Whether to tick the terms & conditions checkbox. Set False to leave it unchecked (booking will likely fail at payment).")
-    debug: bool = Field(settings.debug_screenshots, description="If true, saves a screenshot + visible-text dump to disk after each major step, useful for diagnosing selector failures.")
+    desired_date: Optional[str] = Field(None, description="Date to book, formatted 'YYYY-MM-DD'.")
+    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider.")
+    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider.")
+    desired_time: str = Field(..., description="The exact tee time to book, e.g. '07:30'.")
+    player_count: int = Field(1, description="Number of players (1-4).")
+    personal_info: PersonalInfo = Field(..., description="Lead player details.")
+    additional_players: List[AdditionalPlayer] = Field(default_factory=list, description="Details for players 2-4.")
+    marketing_consent: MarketingConsent = Field(default_factory=MarketingConsent, description="Marketing consent checkboxes.")
+    accept_terms: bool = Field(True, description="Whether to tick the terms & conditions checkbox.")
+    card_details: Optional[CardDetails] = Field(
+        None,
+        description="Card details to fill into Stripe automatically. If omitted, the browser is left open for manual card entry.",
+    )
+    auto_pay: bool = Field(
+        False,
+        description="If True AND card_details are supplied, click the Pay button automatically after filling card details. "
+                    "Defaults to False — set True only when you are confident the form is correct.",
+    )
+    debug: bool = Field(settings.debug_screenshots, description="Save screenshots + text dumps after each major step.")
 
 
 class BookingResponse(BaseModel):
@@ -406,10 +381,10 @@ class BookingResponse(BaseModel):
         }
     })
 
-    session_id: str = Field(..., description="Unique ID for this booking automation session. Use it to poll status or request the browser be closed.")
-    status: str = Field(..., description="One of: 'filled' (form ready, awaiting manual payment), 'error' (automation failed), 'running' (still in progress, poll GET /bookings/{id}).")
-    message: str = Field(..., description="Human-readable summary of what happened or what to do next.")
-    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced during the automation run.")
+    session_id: str = Field(..., description="Unique ID for this booking session.")
+    status: str = Field(..., description="One of: 'filled', 'error', 'running'.")
+    message: str = Field(..., description="Human-readable summary.")
+    log: List[str] = Field(..., description="Step-by-step log lines.")
 
 
 class SessionStatusResponse(BaseModel):
@@ -418,15 +393,15 @@ class SessionStatusResponse(BaseModel):
             "session_id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
             "status": "filled",
             "created_at": 1753600000.0,
-            "log": ["ok: select course", "ok: selected date 2026-07-26"],
+            "log": ["ok: select course"],
             "error": None,
         }
     })
 
     session_id: str = Field(..., description="The session ID being queried.")
     status: str = Field(..., description="One of: 'running', 'filled', 'error', 'closed'.")
-    created_at: float = Field(..., description="Unix timestamp (seconds) when the session was created.")
-    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced so far.")
+    created_at: float = Field(..., description="Unix timestamp when the session was created.")
+    log: List[str] = Field(..., description="Step-by-step log lines.")
     error: Optional[str] = Field(None, description="Error message, present only when status is 'error'.")
 
 
@@ -444,14 +419,14 @@ class AvailableTimesRequest(BaseModel):
         }
     })
 
-    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page to query.")
-    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site, e.g. 'Old Tom Morris Links' or 'Sandy Hills Links'.")
-    holes: str = Field("18 Holes", description="Holes option label, e.g. '18 Holes' or '9 Holes'.")
-    desired_date: Optional[str] = Field(None, description="Date to check, formatted 'YYYY-MM-DD'. Omit to leave the site's default (usually today).")
-    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider's left handle. Omit to leave it at its default.")
-    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider's right handle. Omit to leave it at its default.")
-    headless: bool = Field(True, description="Run the browser headlessly. Safe to leave true — this endpoint only reads data, it never needs a human to see it.")
-    debug: bool = Field(False, description="If true, dumps extra diagnostic state (e.g. calendar geometry JSON) to disk when a step fails.")
+    url: str = Field(settings.default_url, description="Full URL of the BRS Golf tee-sheet page.")
+    course_name: str = Field("Old Tom Morris Links", description="Course label as shown on the site.")
+    holes: str = Field("18 Holes", description="Holes option label.")
+    desired_date: Optional[str] = Field(None, description="Date to check, formatted 'YYYY-MM-DD'.")
+    earliest_time: Optional[str] = Field(None, description="Lower bound 'HH:MM' for the Time range slider.")
+    latest_time: Optional[str] = Field(None, description="Upper bound 'HH:MM' for the Time range slider.")
+    headless: bool = Field(True, description="Run the browser headlessly.")
+    debug: bool = Field(False, description="Dump extra diagnostic state on failure.")
 
 
 class PlayerOption(BaseModel):
@@ -459,10 +434,10 @@ class PlayerOption(BaseModel):
         "example": {"id": "opt-2ball-0730", "label": "2 Players - €180.00", "player_count": 2, "price": "€180.00"}
     })
 
-    id: str = Field(..., description="DOM element id of this option's button on the source page (useful for debugging, not needed for booking).")
-    label: str = Field(..., description="Raw visible label of the option, e.g. '2 Players - €180.00'.")
-    player_count: Optional[int] = Field(None, description="Parsed number of players this option covers, if it could be extracted from the label.")
-    price: Optional[str] = Field(None, description="Parsed price for this option, if it could be extracted from the label.")
+    id: str = Field(..., description="DOM element id of this option's button.")
+    label: str = Field(..., description="Raw visible label, e.g. '2 Players - €180.00'.")
+    player_count: Optional[int] = Field(None, description="Parsed number of players.")
+    price: Optional[str] = Field(None, description="Parsed price.")
 
 
 class TimeSlot(BaseModel):
@@ -474,9 +449,9 @@ class TimeSlot(BaseModel):
         }
     })
 
-    time: str = Field(..., description="Tee time, e.g. '07:30'. Pass this straight into `desired_time` on POST /bookings.")
-    time_button_id: Optional[str] = Field(None, description="DOM element id of the time button on the source page.")
-    player_options: List[PlayerOption] = Field(default_factory=list, description="Player-count / price combinations available for this specific time slot.")
+    time: str = Field(..., description="Tee time, e.g. '07:30'.")
+    time_button_id: Optional[str] = Field(None, description="DOM element id of the time button.")
+    player_options: List[PlayerOption] = Field(default_factory=list, description="Player-count/price combinations.")
 
 
 class RateSection(BaseModel):
@@ -484,8 +459,8 @@ class RateSection(BaseModel):
         "example": {"rate_name": "Visitor Rate", "times": []}
     })
 
-    rate_name: Optional[str] = Field(None, description="Name of the rate/package this group of times belongs to, e.g. 'Visitor Rate'.")
-    times: List[TimeSlot] = Field(default_factory=list, description="Tee times available under this rate.")
+    rate_name: Optional[str] = Field(None, description="Name of the rate/package.")
+    times: List[TimeSlot] = Field(default_factory=list, description="Tee times under this rate.")
 
 
 class AvailableTimesResponse(BaseModel):
@@ -500,12 +475,12 @@ class AvailableTimesResponse(BaseModel):
         }
     })
 
-    course_name: str = Field(..., description="Course this result set is for, echoed back from the request.")
-    holes: str = Field(..., description="Holes option this result set is for, echoed back from the request.")
-    date: Optional[str] = Field(None, description="Date this result set is for, echoed back from the request (may be None if no date was requested).")
-    date_selected: Optional[bool] = Field(None, description="True/False if `desired_date` was supplied and the calendar click was verified to succeed; None if no date was requested at all.")
-    sections: List[RateSection] = Field(..., description="Available tee times grouped by rate/package.")
-    log: List[str] = Field(..., description="Ordered list of step-by-step log lines produced while scraping.")
+    course_name: str = Field(..., description="Course echoed from request.")
+    holes: str = Field(..., description="Holes echoed from request.")
+    date: Optional[str] = Field(None, description="Date echoed from request.")
+    date_selected: Optional[bool] = Field(None, description="Whether the calendar click was verified.")
+    sections: List[RateSection] = Field(..., description="Available tee times grouped by rate.")
+    log: List[str] = Field(..., description="Step-by-step log lines.")
 
 
 # ============================================================
@@ -549,34 +524,6 @@ _session_semaphore = threading.Semaphore(settings.max_concurrent_sessions)
 # ============================================================
 # Shared date-picker automation
 # ============================================================
-#
-# Per the DevTools capture of the real page, this is NOT a Buefy/standard
-# datepicker — the confirmed markup is a custom component:
-#
-#   <div class="teesheet-date-picker control has-icons-right">
-#     <div class="popover-container" tabindex="-1">
-#       <div class="popover-origin direction-bottom align-left"> ... </div>  <-- the popup, when open
-#       <input id="desktop-teesheet-filter-datepicker" readonly ...>
-#     </div>
-#     <span class="icon is-small is-right"><i class="icon-filter-calendar"></i></span>
-#   </div>
-#
-# The internals of `.popover-origin` (header, prev/next arrows, day grid)
-# use unknown/unconfirmed class names, so instead of guessing at more
-# class names, the automation below inspects the *rendered geometry* of
-# the open popup at runtime — it finds the month/year header by text
-# content, finds the prev/next arrows as small icon-sized elements
-# sitting left/right of that header, and finds every day cell as a leaf
-# element (no child elements) whose text is a 1-2 digit number — then
-# clicks by pixel coordinates. This works regardless of what CSS classes
-# the site uses internally, as long as the visual layout in the
-# screenshots (arrows flanking "Month YYYY", a 7-column day grid below
-# it) stays the same.
-#
-# If this still doesn't work, run with debug=True, headless=False and
-# check the *_calendar_state_*.json dumps it writes — they contain the
-# raw header text / arrow coordinates / day-cell list it found, which
-# will show exactly where the geometry heuristic is going wrong.
 
 CALENDAR_INSPECT_JS = r"""
 () => {
@@ -589,7 +536,6 @@ CALENDAR_INSPECT_JS = r"""
 
   const all = Array.from(popup.querySelectorAll('*'));
 
-  // Header: the smallest element whose own trimmed text matches "Month YYYY".
   let headerEl = null, headerText = null;
   for (const el of all) {
     const t = (el.textContent || '').trim();
@@ -602,8 +548,6 @@ CALENDAR_INSPECT_JS = r"""
   }
   const hRect = headerEl.getBoundingClientRect();
 
-  // Prev/next arrows: small (icon-sized) elements roughly level with the
-  // header row, sitting to its left (prev) or right (next).
   let prev = null, next = null;
   for (const el of all) {
     if (el === headerEl || headerEl.contains(el) || el.contains(headerEl)) continue;
@@ -620,8 +564,6 @@ CALENDAR_INSPECT_JS = r"""
     }
   }
 
-  // Day cells: leaf elements (no element children) whose trimmed text is a
-  // 1-2 digit number, collected in reading order (row by row, left to right).
   const days = [];
   for (const el of all) {
     if (el.children.length > 0) continue;
@@ -653,9 +595,6 @@ def _ordinal(n: int) -> str:
 
 
 def _dump_calendar_state(state: dict, filename_prefix: str, tag: str, log_msg):
-    """Write the raw calendar_inspect() result to disk. Only called when
-    debug is on — this is what to paste back if the geometry heuristic
-    still isn't finding the right elements."""
     import json
     try:
         path = f"{filename_prefix}_calendar_state_{tag}.json"
@@ -674,18 +613,6 @@ def select_calendar_date(
     debug: bool = False,
     debug_prefix: str = "calendar",
 ) -> bool:
-    """Open the tee-sheet date picker and click through to `desired_date`
-    (format 'YYYY-MM-DD'), using geometry (not CSS classes) to find the
-    month header, prev/next arrows, and day cells inside the popup.
-
-    Returns True only if the "Select date" input actually reads back the
-    requested date afterward (verified via input_value()) — it never
-    assumes a click "worked" just because Playwright didn't throw, which
-    is the class of bug that was silently leaving today's date selected.
-    Returns False after retries if it can't get there; callers should
-    treat that as "the search below ran against whatever date the site
-    currently shows", not assume success.
-    """
     if not desired_date:
         return True
 
@@ -697,41 +624,27 @@ def select_calendar_date(
 
     date_input = page.locator("#desktop-teesheet-filter-datepicker").first
 
-    # Expected "Select date" box text once the right day is picked, based
-    # on the format visible in the screenshots: "Wednesday 15th July"
-    # (weekday, ordinal day, month — no year, no comma).
-    day_token = _ordinal(target.day)               # e.g. "26th"
-    month_name = MONTH_NAMES[target.month - 1]      # e.g. "July"
-    target_label = f"{month_name} {target.year}"    # e.g. "July 2026", matched in the popup header
+    day_token = _ordinal(target.day)
+    month_name = MONTH_NAMES[target.month - 1]
+    target_label = f"{month_name} {target.year}"
     month_year_re = re.compile(r"([A-Za-z]+)\s+(\d{4})")
     day_str = str(target.day)
 
-    # Position of `target.day` within the 7-wide (Mon-Sun) grid, 0-indexed,
-    # counting the leading days carried over from the previous month —
-    # matches the Mon-first layout confirmed in the screenshots.
-    leading_blanks = date(target.year, target.month, 1).weekday()  # Monday == 0
+    leading_blanks = date(target.year, target.month, 1).weekday()
     expected_index = leading_blanks + (target.day - 1)
 
     max_attempts = 3
     for attempt in range(1, max_attempts + 1):
         try:
-            # .popover-container is always in the DOM (it's just the input's
-            # wrapper) — waiting on it alone would return instantly whether
-            # or not the popup actually opened. Only .popover-origin is the
-            # real signal that the calendar rendered, so wait on that
-            # specifically. And since clicking the input toggles the popup
-            # open/closed, don't re-click if a previous attempt already left
-            # it open — that would just close it again.
             already_open = page.locator(".popover-origin").count() > 0 and page.locator(".popover-origin").first.is_visible()
             if not already_open:
                 date_input.click(timeout=6000)
             page.wait_for_selector(".popover-origin", state="visible", timeout=5000)
             page.wait_for_timeout(300)
         except Exception as e:
-            log_msg(f"  ! (attempt {attempt}) Popup did not open after clicking date input ('.popover-origin' never appeared): {e}")
+            log_msg(f"  ! (attempt {attempt}) Popup did not open after clicking date input: {e}")
             continue
 
-        # Navigate month-by-month to the target month/year.
         max_month_clicks = 36
         matched_month = False
         state = None
@@ -766,10 +679,7 @@ def select_calendar_date(
 
             arrow = state.get("next") if go_forward else state.get("prev")
             if not arrow:
-                log_msg(
-                    f"  ! (attempt {attempt}) Could not locate the "
-                    f"{'next' if go_forward else 'previous'} month arrow near header '{header_text}'"
-                )
+                log_msg(f"  ! (attempt {attempt}) Could not locate the {'next' if go_forward else 'previous'} month arrow near header '{header_text}'")
                 if debug:
                     _dump_calendar_state(state, debug_prefix, f"attempt{attempt}_no_arrow", log_msg)
                 break
@@ -785,10 +695,6 @@ def select_calendar_date(
             log_msg(f"  ! (attempt {attempt}) Gave up navigating calendar to {target_label}")
             continue
 
-        # Click the day cell. Prefer the cell at the computed grid position
-        # (handles day numbers that appear more than once in the grid, e.g.
-        # low numbers repeated as next-month filler days); fall back to the
-        # closest-by-position match with the right text if that misses.
         days = state.get("days", []) if state else []
         cell = None
         if 0 <= expected_index < len(days) and days[expected_index]["text"] == day_str:
@@ -800,10 +706,7 @@ def select_calendar_date(
                 cell = matches[0]
 
         if not cell:
-            log_msg(
-                f"  ! (attempt {attempt}) Could not locate a grid cell for day {day_str} "
-                f"({len(days)} day cells found in popup)"
-            )
+            log_msg(f"  ! (attempt {attempt}) Could not locate a grid cell for day {day_str} ({len(days)} day cells found)")
             if debug and state:
                 _dump_calendar_state(state, debug_prefix, f"attempt{attempt}_no_day_cell", log_msg)
             continue
@@ -816,16 +719,11 @@ def select_calendar_date(
 
         page.wait_for_timeout(400)
 
-        # Close the popup so it can't intercept clicks on "18 Holes" / "9
-        # Holes" or the refresh button underneath it.
         try:
             page.keyboard.press("Escape")
         except Exception:
             pass
 
-        # Verify: read back what the input actually shows now. Match the
-        # ordinal day token as a whole word so day "1" can't false-match
-        # inside "15th" etc.
         try:
             actual_display = date_input.input_value(timeout=3000).strip()
         except Exception as e:
@@ -839,17 +737,14 @@ def select_calendar_date(
             return True
 
         log_msg(
-            f"  ! (attempt {attempt}) Date input reads '{actual_display}', expected it to contain "
-            f"'{day_token}' and '{month_name}' — click did not take effect, retrying..."
+            f"  ! (attempt {attempt}) Date input reads '{actual_display}', expected '{day_token}' and '{month_name}' — retrying..."
         )
         if debug and state:
             _dump_calendar_state(state, debug_prefix, f"attempt{attempt}_verify_mismatch", log_msg)
 
     log_msg(
         f"  ! FAILED to select {target.isoformat()} after {max_attempts} attempts. "
-        f"The search that follows will run against whatever date the site currently shows "
-        f"(likely today). Re-run with debug=True, headless=False and check the "
-        f"*_calendar_state_*.json dumps to see what the geometry heuristic found."
+        f"Re-run with debug=True and check the *_calendar_state_*.json dumps."
     )
     return False
 
@@ -857,31 +752,8 @@ def select_calendar_date(
 # ============================================================
 # Shared time-range slider automation
 # ============================================================
-#
-# The "Time" filter is a vue-slider-component range slider:
-#
-#   <div class="vue-slider ...">
-#     <div class="vue-slider-rail">
-#       <div class="vue-slider-process" style="left: 6.667%; width: 86.667%;">
-#       <div class="vue-slider-dot" role="slider" aria-valuenow="06:00"
-#            style="left: 6.667%; ..."> ... </div>   <-- earliest-time handle
-#       <div class="vue-slider-dot" role="slider" aria-valuenow="19:00"
-#            style="left: 93.333%; ..."> ... </div>  <-- latest-time handle
-#     </div>
-#   </div>
-#
-# It's a real Vue component with internal reactive state, so a CSS-only
-# style edit would move the handle visually without updating the site's
-# actual filter — it needs a genuine simulated mouse drag to register.
-#
-# The slider's time domain (e.g. 05:00-20:00) isn't hardcoded: it's
-# calibrated at runtime from the two handles' current (percent, time)
-# pairs — read straight off their `style="left: X%"` and
-# `aria-valuenow="HH:MM"` — which pins down the linear percent<->time
-# mapping regardless of what the actual domain is.
 
 def _parse_hhmm(s: str) -> Optional[int]:
-    """'HH:MM' -> minutes since midnight, or None if unparseable."""
     m = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", s or "")
     if not m:
         return None
@@ -895,11 +767,6 @@ def _format_hhmm(total_minutes: float) -> str:
 
 
 def _read_time_slider_dots(page: Page) -> Optional[list]:
-    """Return the Time slider's two handles as
-    [{'percent': float, 'minutes': int, 'text': str, 'index': int}, ...],
-    sorted left-to-right (so [0] is the earliest-time handle, [1] is the
-    latest-time handle). Returns None if the slider isn't found or its
-    handles can't be read."""
     try:
         dots = page.locator(".vue-slider .vue-slider-dot")
         count = dots.count()
@@ -929,15 +796,6 @@ def select_time_range(
     log_msg,
     debug: bool = False,
 ) -> bool:
-    """Drag the Time slider's handles to `earliest_time` / `latest_time`
-    (each 'HH:MM'; either may be omitted to leave that handle where it is).
-
-    Returns True if every requested handle lands within 15 minutes of its
-    target (the slider may snap to a step size that isn't known in
-    advance, e.g. 10-minute increments), False otherwise. A False return
-    still leaves the slider in *some* state — just not exactly the one
-    requested — so treat it as "worth logging", not a hard stop.
-    """
     if not earliest_time and not latest_time:
         return True
 
@@ -958,11 +816,9 @@ def select_time_range(
 
     lo, hi = dots_state[0], dots_state[1]
     if hi["percent"] == lo["percent"]:
-        log_msg("  ! Time-range slider handles are at the same position; can't calibrate its scale")
+        log_msg("  ! Time-range slider handles are at the same position; can't calibrate scale")
         return False
 
-    # Calibrate: minutes = domain_start + slope * percent, from the two
-    # known (percent, minutes) points currently on the slider.
     slope = (hi["minutes"] - lo["minutes"]) / (hi["percent"] - lo["percent"])
     domain_start = lo["minutes"] - slope * lo["percent"]
 
@@ -986,8 +842,6 @@ def select_time_range(
 
             page.mouse.move(start_x, start_y)
             page.mouse.down()
-            # A couple of intermediate moves — some slider libraries need a
-            # minimum pointer travel/step count before they register a drag.
             page.mouse.move((start_x + target_x) / 2, start_y, steps=5)
             page.mouse.move(target_x, start_y, steps=10)
             page.mouse.up()
@@ -1015,7 +869,6 @@ def select_time_range(
         else:
             ok = drag_handle(hi["index"], target, "latest") and ok
 
-    # Verify: read the handles back and check how close we landed.
     final_state = _read_time_slider_dots(page)
     if not final_state or len(final_state) < 2:
         log_msg("  ! Could not read back the time-range slider after dragging")
@@ -1028,21 +881,13 @@ def select_time_range(
     if earliest_time:
         target = _parse_hhmm(earliest_time)
         if target is not None and abs(final_lo["minutes"] - target) > tolerance_min:
-            log_msg(
-                f"  ! Earliest time landed at {final_lo['text']}, wanted {earliest_time} "
-                f"(off by {abs(final_lo['minutes'] - target)} min — the slider may snap to a step "
-                f"size, e.g. 10 or 15 minutes)"
-            )
+            log_msg(f"  ! Earliest time landed at {final_lo['text']}, wanted {earliest_time} (off by {abs(final_lo['minutes'] - target)} min)")
             verified = False
 
     if latest_time:
         target = _parse_hhmm(latest_time)
         if target is not None and abs(final_hi["minutes"] - target) > tolerance_min:
-            log_msg(
-                f"  ! Latest time landed at {final_hi['text']}, wanted {latest_time} "
-                f"(off by {abs(final_hi['minutes'] - target)} min — the slider may snap to a step "
-                f"size, e.g. 10 or 15 minutes)"
-            )
+            log_msg(f"  ! Latest time landed at {final_hi['text']}, wanted {latest_time} (off by {abs(final_hi['minutes'] - target)} min)")
             verified = False
 
     if verified:
@@ -1059,7 +904,7 @@ class BookingSession:
         self.session_id = session_id
         self.req = req
         self.log: List[str] = []
-        self.status = "running"   # running -> filled/error -> closed
+        self.status = "running"
         self.error: Optional[str] = None
         self.created_at = time.time()
         self.ready_event = threading.Event()
@@ -1069,8 +914,6 @@ class BookingSession:
         self._thread = threading.Thread(target=self._run, daemon=True)
 
     def start(self) -> bool:
-        """Returns False (without starting a thread) if the concurrency
-        limit is already reached."""
         if not _session_semaphore.acquire(blocking=False):
             return False
         self._acquired_slot = True
@@ -1239,6 +1082,135 @@ class BookingSession:
         self.log_msg(f"  ok: fell back to '{cleaned[0]}'")
         return True
 
+    # ----------------------------------------------------------
+    # Stripe card filling
+    # ----------------------------------------------------------
+
+    def fill_stripe_card(self, page: Page, card: CardDetails) -> bool:
+        """
+        Fill Stripe's combined card iframe by clicking into the wrapper
+        and using keyboard input to move between card number -> expiry -> CVV.
+
+        Stripe's card element is a cross-origin sandboxed iframe, so
+        Playwright's normal fill() / frame_locator() APIs won't reach it
+        on live publishable keys. The only reliable approach is:
+          1. Click the wrapper div to hand focus to the iframe.
+          2. Type the card number — Stripe inserts spaces automatically.
+          3. Tab into expiry, type MMYY.
+          4. Tab into CVV, type the digits.
+
+        The method tries two click strategies:
+          - Primary:  page.locator("#stripe-card").click()
+          - Fallback: page.mouse.click() at the centre of the bounding box
+            (needed when the iframe intercepts pointer events before the
+            wrapper registers them).
+        """
+        self.log_msg("Waiting for Stripe card element...")
+        stripe_wrapper = page.locator("#stripe-card")
+
+        try:
+            stripe_wrapper.wait_for(state="visible", timeout=15000)
+            self.log_msg("  ok: Stripe card element is visible")
+        except Exception as e:
+            self.log_msg(f"  ! Stripe card element never became visible: {e}")
+            self.snapshot(page, "stripe_not_visible")
+            return False
+
+        # Scroll the checkout section into view so the iframe is on screen
+        # before we try to click it — an off-screen click silently fails.
+        try:
+            page.locator(".checkout-section").scroll_into_view_if_needed(timeout=5000)
+            page.wait_for_timeout(400)
+        except Exception:
+            pass
+
+        # --- Strategy 1: locator click ---
+        clicked = False
+        try:
+            stripe_wrapper.click(timeout=6000)
+            page.wait_for_timeout(700)
+            clicked = True
+            self.log_msg("  ok: clicked Stripe wrapper (strategy 1)")
+        except Exception as e:
+            self.log_msg(f"  ! Locator click failed ({e}), trying bounding-box click...")
+
+        # --- Strategy 2: mouse.click at centre of bounding box ---
+        if not clicked:
+            try:
+                box = stripe_wrapper.bounding_box(timeout=5000)
+                if box:
+                    cx = box["x"] + box["width"] / 2
+                    cy = box["y"] + box["height"] / 2
+                    page.mouse.click(cx, cy)
+                    page.wait_for_timeout(700)
+                    clicked = True
+                    self.log_msg("  ok: clicked Stripe wrapper (strategy 2 — bounding box)")
+                else:
+                    self.log_msg("  ! Stripe wrapper has no bounding box — is it visible?")
+            except Exception as e:
+                self.log_msg(f"  ! Bounding-box click also failed: {e}")
+
+        if not clicked:
+            self.log_msg("  ! Could not focus the Stripe card element by any click strategy")
+            self.snapshot(page, "stripe_click_failed")
+            return False
+
+        try:
+            # ── Card number ──────────────────────────────────────────────
+            # Type digits with a small inter-key delay so Stripe's JS can
+            # keep up with the input events and format the number correctly.
+            self.log_msg("  Typing card number...")
+            page.keyboard.type(card.card_number, delay=80)
+            page.wait_for_timeout(500)
+
+            # ── Expiry ───────────────────────────────────────────────────
+            # A single Tab moves focus from the card number field to the
+            # expiry field within the same Stripe iframe.
+            self.log_msg("  Typing expiry (Stripe auto-advanced)...")
+            page.keyboard.type(card.expiry, delay=80)
+            page.wait_for_timeout(500)
+
+            # expiry is 'MMYY' e.g. '1228'; Stripe renders it as 'MM / YY'
+            self.log_msg("  Typing expiry...")
+            page.keyboard.type(card.expiry, delay=80)
+            page.wait_for_timeout(300)
+
+            # ── CVV ──────────────────────────────────────────────────────
+            self.log_msg("  Tabbing to CVV field...")
+            page.keyboard.press("Tab")
+            page.wait_for_timeout(300)
+
+            self.log_msg("  Typing CVV...")
+            page.keyboard.type(card.cvv, delay=80)
+
+            self.snapshot(page, "05_card_filled")
+            self.log_msg("  ok: Stripe card details typed")
+            return True
+
+        except Exception as e:
+            self.log_msg(f"  ! Error while typing card details: {e}")
+            self.snapshot(page, "stripe_type_error")
+            return False
+
+    def click_pay_button(self, page: Page) -> bool:
+        """Click the Pay button after card details have been filled."""
+        self.log_msg("Clicking Pay button...")
+        pay_btn = page.locator("#checkout-pay")
+        try:
+            pay_btn.wait_for(state="visible", timeout=8000)
+            pay_btn.scroll_into_view_if_needed(timeout=5000)
+            pay_btn.click(timeout=8000)
+            self.log_msg("  ok: Pay button clicked")
+            return True
+        except Exception as e:
+            self.log_msg(f"  ! Could not click Pay button: {e}")
+            self.snapshot(page, "pay_button_failed")
+            return False
+
+    # ----------------------------------------------------------
+    # Main booking flow
+    # ----------------------------------------------------------
+
     def _do_booking_flow(self, page: Page):
         req = self.req
 
@@ -1330,7 +1302,31 @@ class BookingSession:
         self.accept_terms(page)
 
         self.snapshot(page, "04_form_filled")
-        self.log_msg("Form filled. Browser left open for manual payment.")
+
+        # ── Stripe card details ──────────────────────────────────────────
+        if req.card_details:
+            card_ok = self.fill_stripe_card(page, req.card_details)
+            if card_ok:
+                if req.auto_pay:
+                    self.log_msg("auto_pay=True — clicking Pay button automatically...")
+                    self.click_pay_button(page)
+                else:
+                    self.log_msg(
+                        "Card details filled. auto_pay=False — browser left open. "
+                        "Review the form then click Pay manually."
+                    )
+            else:
+                self.log_msg(
+                    "! Card fill failed — browser left open for manual card entry. "
+                    "Check the stripe_* debug screenshots for details."
+                )
+        else:
+            self.log_msg(
+                "No card_details provided — browser left open. "
+                "Enter card details and click Pay manually."
+            )
+
+        self.log_msg("Booking flow complete. Browser remains open.")
 
     def _run(self):
         try:
@@ -1367,7 +1363,7 @@ class BookingSession:
 
 
 # ============================================================
-# Available-times scraping (read-only, no booking)
+# Available-times scraping
 # ============================================================
 
 SCRAPE_TIMES_JS = """
@@ -1463,9 +1459,7 @@ def scrape_available_times(req: AvailableTimesRequest) -> AvailableTimesResponse
                 )
 
             if req.earliest_time or req.latest_time:
-                log_msg(
-                    f"Setting time range {req.earliest_time or 'default'} - {req.latest_time or 'default'}..."
-                )
+                log_msg(f"Setting time range {req.earliest_time or 'default'} - {req.latest_time or 'default'}...")
                 select_time_range(page, req.earliest_time, req.latest_time, log_msg, debug=req.debug)
 
             log_msg("Selecting holes...")
@@ -1539,14 +1533,20 @@ _reaper_thread = threading.Thread(target=_reap_sessions_loop, daemon=True)
 
 
 # ============================================================
-# App lifespan (startup/shutdown)
+# App lifespan
 # ============================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Starting up: max_concurrent_sessions=%d, ttl=%ds", settings.max_concurrent_sessions, settings.session_ttl_seconds)
+    logger.info(
+        "Starting up: max_concurrent_sessions=%d, ttl=%ds",
+        settings.max_concurrent_sessions, settings.session_ttl_seconds,
+    )
     if not settings.api_key:
-        logger.warning("BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. Set it before exposing this to the internet.")
+        logger.warning(
+            "BOOKING_API_KEY is not set — every endpoint is UNAUTHENTICATED. "
+            "Set it before exposing this to the internet."
+        )
     start_virtual_display()
     start_vnc_server()
     _reaper_thread.start()
@@ -1558,9 +1558,8 @@ async def lifespan(app: FastAPI):
     with SESSIONS_LOCK:
         sessions = list(SESSIONS.values())
     for s in sessions:
-        if s.status == "running" or s.status == "filled":
+        if s.status in ("running", "filled"):
             s.request_close()
-    # Give browsers a moment to close cleanly.
     deadline = time.time() + 10
     for s in sessions:
         remaining = max(0, deadline - time.time())
@@ -1571,73 +1570,62 @@ async def lifespan(app: FastAPI):
 
 
 # ============================================================
-# OpenAPI / Swagger metadata
+# OpenAPI metadata
 # ============================================================
-# `tags_metadata` controls the grouping + descriptions shown at the top
-# of each section in Swagger UI (/docs) and ReDoc (/redoc).
 
 tags_metadata = [
     {
         "name": "availability",
-        "description": "Read-only endpoints for checking what tee times are currently open. "
-                        "Never touches the booking form — safe to call as often as you like "
-                        "(subject to the rate limit).",
+        "description": "Read-only endpoints for checking what tee times are open. "
+                       "Never touches the booking form — safe to call frequently.",
     },
     {
         "name": "bookings",
-        "description": "Endpoints that drive the actual booking automation: opening a real "
-                        "browser, filling in the tee-sheet form, and stopping just short of "
-                        "payment so a human can review and pay.",
+        "description": "Endpoints that drive the booking automation: opening a browser, "
+                       "filling the form, optionally filling card details and paying.",
     },
     {
         "name": "sessions",
-        "description": "Introspection into currently tracked booking sessions (open browser "
-                        "windows) — useful for admin/debug dashboards.",
+        "description": "Introspection into currently tracked booking sessions.",
     },
     {
         "name": "health",
-        "description": "Unauthenticated liveness/readiness probe, intended for load balancers "
-                        "and systemd/orchestrator health checks.",
+        "description": "Unauthenticated liveness/readiness probe.",
     },
 ]
 
 API_DESCRIPTION = """
 Wraps a Playwright browser-automation flow for the Rosapenna (BRS Golf)
-visitor tee-sheet so a booking can be triggered by POSTing JSON instead
-of hand-editing a script.
+visitor tee-sheet.
 
 ### How it works
 
-1. `POST /available-times` — headlessly scrapes which tee times are open
-   for a given course/date/hole-count/time-range, without touching the
-   booking form.
-2. `POST /bookings` — opens a **real, visible** Chromium window, walks
-   through course/date/time/player-count selection, and fills in the
-   personal-details form. It **stops before payment** — a human must
-   look at the open browser (directly, or over VNC on a headless VPS)
-   and click "Pay" themselves.
-3. `GET /bookings/{id}` — poll a session's status/log if the initial
-   `POST /bookings` call returned `status: "running"` (i.e. it took
-   longer than `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS` to fill the form).
-4. `POST /bookings/{id}/close` — tell the server it's safe to close that
-   session's browser window once payment is done (or abandoned).
+1. `POST /available-times` — headlessly scrapes open tee times.
+2. `POST /bookings` — opens a real Chromium window, fills course/date/time/
+   players/personal details, and optionally fills Stripe card details.
+   Set `auto_pay: true` to also click Pay automatically.
+3. `GET /bookings/{id}` — poll session status.
+4. `POST /bookings/{id}/close` — close the browser once done.
+
+### Card details
+
+Pass `card_details: { card_number, expiry, cvv }` in the booking request
+to have card details filled automatically. Stripe's iframe is cross-origin
+so this works via simulated keyboard input (click → type number → Tab →
+type expiry → Tab → type CVV).
+
+Set `auto_pay: true` to also click the Pay button after filling card details.
+Leave it `false` (default) to review manually before paying.
 
 ### Authentication
 
-Every route except `/health` requires an `X-API-Key` header matching the
-server's configured `BOOKING_API_KEY`. Use the **Authorize** button in
-Swagger UI to set it once for the whole session.
-
-### Rate limiting
-
-Requests are limited per client IP (`BOOKING_RATE_LIMIT_PER_MINUTE`,
-default 20/minute). Exceeding it returns `429 Too Many Requests`.
+Every route except `/health` requires an `X-API-Key` header.
 """
 
 app = FastAPI(
     title="Rosapenna Tee Time Booking API",
     description=API_DESCRIPTION,
-    version="1.0.0",
+    version="1.1.0",
     contact={"name": "Booking API Maintainer"},
     openapi_tags=tags_metadata,
     lifespan=lifespan,
@@ -1666,14 +1654,17 @@ async def unhandled_exception_handler(request: Request, exc: Exception):
     "/health",
     tags=["health"],
     summary="Liveness / readiness probe",
-    description="Returns basic service status and current session load. Does **not** require "
-                "an API key, so it's safe to point a load balancer or systemd watchdog at it.",
-    response_description="Service status plus current vs. maximum concurrent booking sessions.",
+    description="Returns basic service status. No API key required.",
+    response_description="Service status and current session load.",
 )
 def health():
     with SESSIONS_LOCK:
         active = sum(1 for s in SESSIONS.values() if s.status == "running")
-    return {"status": "ok", "active_sessions": active, "max_concurrent_sessions": settings.max_concurrent_sessions}
+    return {
+        "status": "ok",
+        "active_sessions": active,
+        "max_concurrent_sessions": settings.max_concurrent_sessions,
+    }
 
 
 @app.post(
@@ -1683,20 +1674,17 @@ def health():
     tags=["bookings"],
     summary="Start a booking automation run",
     description=(
-        "Launches a real, visible Chromium browser, navigates to the tee sheet, selects the "
-        "course/date/holes/time-range, clicks the requested `desired_time`, chooses the "
-        "player count, and fills in the personal-details form for all players. "
-        "**It never submits payment** — the browser window is left open so a human can review "
-        "the filled form and pay manually (via VNC if running on a headless VPS).\n\n"
-        "The call blocks (up to `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS`, default 90s) waiting "
-        "for the form to finish filling. If it's still running when that timeout elapses, the "
-        "response comes back with `status: \"running\"` — poll `GET /bookings/{session_id}` "
-        "for the final result."
+        "Opens a real Chromium browser, navigates the tee sheet, fills all form fields, "
+        "and optionally fills Stripe card details and clicks Pay.\n\n"
+        "Supply `card_details` to automate card entry. Set `auto_pay: true` to also "
+        "click Pay — leave it false (default) to review before paying.\n\n"
+        "Blocks up to `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS` (default 90s); returns "
+        "`status: 'running'` if still in progress — poll `GET /bookings/{id}`."
     ),
-    response_description="The session ID plus current status ('filled', 'error', or 'running') and step-by-step log.",
+    response_description="Session ID, status, and step-by-step log.",
     responses={
-        429: {"description": "At capacity — `BOOKING_MAX_CONCURRENT_SESSIONS` browsers are already open, or the per-IP rate limit was exceeded."},
-        401: {"description": "Missing or invalid `X-API-Key` header."},
+        429: {"description": "At capacity or rate limit exceeded."},
+        401: {"description": "Missing or invalid X-API-Key."},
     },
 )
 def create_booking(req: BookingRequest):
@@ -1733,9 +1721,16 @@ def create_booking(req: BookingRequest):
     return BookingResponse(
         session_id=session_id,
         status="filled",
-        message="Form filled successfully. Browser is open — complete payment manually "
-                "(connect via VNC if running headless on a VPS), then call "
-                "POST /bookings/{session_id}/close when done.",
+        message=(
+            "Form filled successfully. "
+            + (
+                "Card details entered and Pay clicked automatically."
+                if req.card_details and req.auto_pay
+                else "Card details entered — click Pay manually to complete."
+                if req.card_details
+                else "Browser left open — enter card details and click Pay manually."
+            )
+        ),
         log=session.log,
     )
 
@@ -1747,15 +1742,13 @@ def create_booking(req: BookingRequest):
     tags=["availability"],
     summary="List open tee times for a course/date",
     description=(
-        "Headlessly loads the tee sheet, applies the given course / date / holes / time-range "
-        "filters, and scrapes every visible tee time along with its player-count and price "
-        "options. Read-only — never fills in or submits the booking form. Use the returned "
-        "`time` values directly as `desired_time` in a subsequent `POST /bookings` call."
+        "Headlessly loads the tee sheet, applies filters, and scrapes every visible tee time "
+        "with player-count/price options. Read-only — never fills the booking form."
     ),
-    response_description="Tee times grouped by rate/package, each with its available player-count/price options.",
+    response_description="Tee times grouped by rate/package.",
     responses={
-        401: {"description": "Missing or invalid `X-API-Key` header."},
-        500: {"description": "The scrape failed (e.g. site layout changed, selector timeout, or navigation error)."},
+        401: {"description": "Missing or invalid X-API-Key."},
+        500: {"description": "Scrape failed."},
     },
 )
 def get_available_times(req: AvailableTimesRequest):
@@ -1772,13 +1765,11 @@ def get_available_times(req: AvailableTimesRequest):
     dependencies=COMMON_DEPS,
     tags=["bookings"],
     summary="Poll a booking session's status",
-    description="Fetch the current status and full step-by-step log for a booking session "
-                "created via `POST /bookings`. Use this to poll when the initial call returned "
-                "`status: \"running\"`.",
-    response_description="Current status ('running', 'filled', 'error', or 'closed'), creation time, log, and error (if any).",
+    description="Fetch the current status and log for a session created via POST /bookings.",
+    response_description="Status, creation time, log, and error if any.",
     responses={
-        404: {"description": "No session found with that ID (never existed, or already reaped after closing)."},
-        401: {"description": "Missing or invalid `X-API-Key` header."},
+        404: {"description": "Session not found."},
+        401: {"description": "Missing or invalid X-API-Key."},
     },
 )
 def get_booking_status(session_id: str):
@@ -1798,14 +1789,11 @@ def get_booking_status(session_id: str):
     "/bookings/{session_id}/close",
     tags=["bookings"],
     summary="Close a booking session's browser",
-    description="Signals the background thread to close that session's Chromium window. "
-                "Call this once payment has been completed manually (or abandoned) so the "
-                "browser and its resources are freed up promptly rather than waiting for the "
-                "session TTL to expire.",
+    description="Signals the background thread to close the Chromium window. Call once payment is done or abandoned.",
     response_description="Acknowledgement that the close request was received.",
     responses={
-        404: {"description": "No session found with that ID."},
-        401: {"description": "Missing or invalid `X-API-Key` header."},
+        404: {"description": "Session not found."},
+        401: {"description": "Missing or invalid X-API-Key."},
     },
 )
 def close_booking(session_id: str):
@@ -1820,10 +1808,9 @@ def close_booking(session_id: str):
     "/sessions",
     tags=["sessions"],
     summary="List all tracked booking sessions",
-    description="Admin/debug endpoint returning every booking session currently held in "
-                "memory (not yet reaped), regardless of status.",
-    response_description="List of sessions with their ID, status, creation time, and error (if any).",
-    responses={401: {"description": "Missing or invalid `X-API-Key` header."}},
+    description="Admin/debug endpoint returning every session currently in memory.",
+    response_description="List of sessions with ID, status, creation time, and error.",
+    responses={401: {"description": "Missing or invalid X-API-Key."}},
 )
 def list_sessions():
     with SESSIONS_LOCK:

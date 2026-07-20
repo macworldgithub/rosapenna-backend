@@ -1,4 +1,0 @@
-{
-  "error": "no month/year header text found in popup",
-  "htmlSnippet": "<div data-v-1ad2436f=\"\" tabindex=\"-1\" class=\"popover-container\"><!----> <input data-v-1ad2436f=\"\" type=\"text\" placeholder=\"Select date\" id=\"mobile-teesheet-filter-datepicker\" readonly=\"readonly\" class=\"input is-radiusless pointer\" style=\"min-width: 100px;\"></div>"
-}
