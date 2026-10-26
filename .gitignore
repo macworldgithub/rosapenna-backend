@@ -1,8 +1,12 @@
 #Python project
 .venv
 .env
+.env.*
 __pycache__
 *.pyc
 .vscode
 .idea
 *.log
+state/
+.temp/
+.uv-cache/
