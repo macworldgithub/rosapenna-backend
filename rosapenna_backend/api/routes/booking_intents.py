@@ -46,6 +46,21 @@ def get_booking_intent(
         raise HTTPException(404, "Booking intent was not found") from None
 
 
+@router.get(
+    "/booking-intents/by-reference/{reference}", tags=["booking intents"],
+    summary="Lookup unified booking by booking reference or Opera reservation ID",
+    responses={401: {"description": "Missing or invalid API key."}, 404: {"description": "Booking record not found."}},
+)
+def get_booking_by_reference(
+    reference: str,
+    store: BookingIntentStore = Depends(get_booking_intent_store),
+):
+    try:
+        return store.get_by_reference(reference)
+    except IntentNotFound:
+        raise HTTPException(404, "Booking record was not found") from None
+
+
 @router.post(
     "/booking-intents/{intent_id}/actions", tags=["booking intents"],
     summary="Append an evidence-backed booking draft action with revision checking",

@@ -105,4 +105,3 @@ def close_booking(session_id: str, manager: BookingSessionManager = Depends(get_
     return {"session_id": session_id, "message": "Close requested; browser will shut down shortly."}
 
 
-\n

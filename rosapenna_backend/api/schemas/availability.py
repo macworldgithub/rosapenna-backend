@@ -1,6 +1,6 @@
 """Availability and tee-sheet API models."""
 
-from datetime import date
+from datetime import date, datetime
 from typing import List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -95,3 +95,44 @@ class QuoteSelection(BaseModel):
     players: int = Field(ge=1, le=4)
     price: str = Field(max_length=30)
     currency: str = Field(pattern=r"^[A-Z]{3}$")
+
+
+class BrsSlotRate(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    rate_id: int
+    package_name: str
+    players: int = Field(ge=1, le=4)
+    price_per_player: str = Field(pattern=r"^\d{1,8}(?:\.\d{1,2})?$")
+    total_price: str = Field(pattern=r"^\d{1,8}(?:\.\d{1,2})?$")
+    currency: str = "EUR"
+    num_holes: str = "18"
+    type: str = "Visitor"
+
+
+class BrsTeeSlot(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    slot_id: int
+    time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+    holes: str = "18"
+    available_capacity: int = Field(ge=0, le=4)
+    is_available: bool
+    rates: List[BrsSlotRate] = Field(default_factory=list)
+    inventory_id: str
+
+
+class BrsCourseAvailabilityResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    course_id: int
+    course_name: str
+    tenant: str
+    date: date
+    status: str  # "available", "no_availability", "unconfigured_tenant", "stale_snapshot"
+    available_slots_count: int
+    slots: List[BrsTeeSlot] = Field(default_factory=list)
+    retrieved_at: datetime
+    freshness_ttl_seconds: int = 60
+    reserves_inventory: bool = False
+    source: str  # "brs_api", "fixture_fallback"

@@ -10,6 +10,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from rosapenna_backend.api.schemas.brs_booking import CaddyRequestPayload
 from rosapenna_backend.integrations.brs.tee_sheet import COURSES
 
 MAX_ACTIONS = 200
@@ -92,6 +93,68 @@ class RevalidatedQuote(BaseModel):
     def normalize_price(cls, value: str) -> str:
         return _price(value)
 
+
+class OperaReservationPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    reservation_id: str = Field(min_length=1, max_length=100)
+    confirmation_number: str | None = Field(default=None, max_length=100)
+    hotel_id: str = Field(default="ROSA", max_length=50)
+    room_category: str = Field(min_length=1, max_length=50)
+    room_quantity: int = Field(default=1, ge=1, le=10)
+    room_group_id: str | None = Field(default=None, max_length=100)
+    arrival_date: Date
+    departure_date: Date
+    total_amount: str = Field(pattern=PRICE_PATTERN, max_length=11)
+    currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
+    status: str = Field(default="Reserved", max_length=50)
+
+    @field_validator("total_amount")
+    @classmethod
+    def normalize_price(cls, value: str) -> str:
+        return _price(value)
+
+
+class BrsRoundPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    round_id: str = Field(min_length=1, max_length=50)
+    course_id: int = Field(gt=0, strict=True)
+    course_name: str = Field(min_length=1, max_length=100)
+    date: Date
+    time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$", strict=True)
+    holes: str = Field(default="18", max_length=40)
+    players: int = Field(ge=1, le=4, strict=True)
+    brs_booking_id: str | None = Field(default=None, max_length=100)
+    booking_reference: str | None = Field(default=None, max_length=100)
+    price: str = Field(pattern=PRICE_PATTERN, max_length=11)
+    currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
+    status: str = Field(default="Reserved", max_length=50)
+    caddy_request: CaddyRequestPayload | None = None
+
+    @field_validator("price")
+    @classmethod
+    def normalize_price(cls, value: str) -> str:
+        return _price(value)
+
+
+class PaymentRecordPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    payment_id: str = Field(min_length=1, max_length=100)
+    provider: str = Field(min_length=1, max_length=50)
+    payment_type: Literal["deposit", "balance", "full"]
+    amount: str = Field(pattern=PRICE_PATTERN, max_length=11)
+    currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
+    status: Literal["pending", "completed", "failed", "refunded"]
+    provider_reference: str | None = Field(default=None, max_length=150)
+
+    @field_validator("amount")
+    @classmethod
+    def normalize_price(cls, value: str) -> str:
+        return _price(value)
+
+
 IntentActionName = Literal[
     "live_revalidation_passed",
     "live_revalidation_failed",
@@ -101,6 +164,11 @@ IntentActionName = Literal[
     "checkout_preparation_failed",
     "checkout_preparation_blocked",
     "checkout_preparation_outcome_unknown",
+    "link_opera_reservation",
+    "link_brs_round",
+    "record_payment",
+    "confirm_booking",
+    "mark_recovery_required",
 ]
 
 class BookingIntentAction(BaseModel):
@@ -110,6 +178,9 @@ class BookingIntentAction(BaseModel):
     expected_revision: int = Field(ge=1, strict=True)
     action: IntentActionName
     quote: RevalidatedQuote | None = None
+    opera_payload: OperaReservationPayload | None = None
+    brs_payload: BrsRoundPayload | None = None
+    payment_payload: PaymentRecordPayload | None = None
     status_code: int | None = Field(default=None, ge=100, le=599, strict=True)
     detail_code: Literal[
         "quote_or_availability_changed",
@@ -148,4 +219,13 @@ class BookingIntentAction(BaseModel):
         elif self.action == "checkout_preparation_outcome_unknown":
             if self.status_code is not None or self.quote is not None or self.detail_code != "upstream_outcome_unknown":
                 raise ValueError("An unknown outcome must not claim an upstream response")
+        elif self.action == "link_opera_reservation":
+            if self.opera_payload is None:
+                raise ValueError("link_opera_reservation requires opera_payload")
+        elif self.action == "link_brs_round":
+            if self.brs_payload is None:
+                raise ValueError("link_brs_round requires brs_payload")
+        elif self.action == "record_payment":
+            if self.payment_payload is None:
+                raise ValueError("record_payment requires payment_payload")
         return self

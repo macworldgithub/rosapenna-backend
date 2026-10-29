@@ -1,27 +1,60 @@
-"""MongoDB-backed tee-sheet cache and daily refresh scheduler."""
+"""Real-time in-memory tee-sheet cache with short TTL."""
 
+from decimal import Decimal
 import threading
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from typing import Optional
 
-from pymongo.errors import DuplicateKeyError, PyMongoError
-
-from rosapenna_backend.api.schemas.availability import QuoteSelection
+from rosapenna_backend.api.schemas.availability import (
+    BrsCourseAvailabilityResponse,
+    BrsSlotRate,
+    BrsTeeSlot,
+    QuoteSelection,
+)
 from rosapenna_backend.core.logging import logger
-from rosapenna_backend.integrations.brs.tee_sheet import BrsReader, COURSES, DUBLIN, amount
+from rosapenna_backend.integrations.brs.tee_sheet import (
+    BrsIntegrationError,
+    BrsMalformedResponseError,
+    BrsReader,
+    BrsTenantUnconfiguredError,
+    BrsUnsupportedQueryError,
+    COURSES,
+    DUBLIN,
+    amount,
+)
+
 
 class TeesheetCache:
-    def __init__(self, database, days=30, refresh_hour=5, reader_factory=BrsReader, now=None):
-        self.sheets = database["tee_sheets"]
-        self.runs = database["tee_sheet_refresh_runs"]
+    """Real-time in-memory cache for BRS tee sheets with a 60-second TTL."""
+
+    def __init__(
+        self,
+        database=None,
+        days=30,
+        refresh_hour=5,
+        reader_factory=BrsReader,
+        now=None,
+        ttl_seconds=60,
+    ):
         self.days = days
         self.refresh_hour = refresh_hour
         self.reader_factory = reader_factory
         self.now = now or (lambda: datetime.now(timezone.utc))
+        self.ttl_seconds = ttl_seconds
         self.stop = threading.Event()
-        self.thread = None
         self.live_lock = threading.Lock()
-        self.sheets.create_index([("day", 1), ("course_id", 1)], unique=True,
-                                 name="day_course_unique")
+        self._cache_lock = threading.Lock()
+        self._memory_cache = {}  # key: (day_str, course_id) -> {"data": data, "fetched_at": datetime}
+
+        if database is not None:
+            self.sheets = database["tee_sheets"]
+            self.runs = database["tee_sheet_refresh_runs"]
+            self.sheets.create_index(
+                [("day", 1), ("course_id", 1)], unique=True, name="day_course_unique"
+            )
+        else:
+            self.sheets = None
+            self.runs = None
 
     def window(self):
         start = self.now().astimezone(DUBLIN).date()
@@ -30,100 +63,94 @@ class TeesheetCache:
     def check_selection(self, day, course_id):
         start, end = self.window()
         if course_id not in COURSES:
-            raise ValueError("Unsupported course")
+            raise BrsUnsupportedQueryError(f"Unsupported course ID {course_id}. Supported: {list(COURSES.keys())}")
         if not start <= day <= end:
-            raise ValueError(f"Choose a date between {start} and {end}")
+            raise BrsUnsupportedQueryError(f"Choose a date between {start} and {end}")
 
     def save(self, day, course_id, data):
-        key = {"day": str(day), "course_id": course_id}
-        # A deterministic _id also makes simultaneous first writes converge.
-        values = {**key, "data": data, "fetched_at": self.now()}
-        try:
-            self.sheets.update_one(key, {"$set": values, "$setOnInsert": {
-                "_id": f"{day}:{course_id}",
-            }}, upsert=True)
-        except DuplicateKeyError:
-            # Another request inserted this course/day while the upsert was running.
-            self.sheets.update_one(key, {"$set": values})
+        """Save a sheet into the in-memory cache and database if available."""
+        key = (str(day), course_id)
+        now_dt = self.now()
+        with self._cache_lock:
+            self._memory_cache[key] = {"data": data, "fetched_at": now_dt}
+        if self.sheets is not None:
+            db_key = {"day": str(day), "course_id": course_id}
+            values = {**db_key, "data": data, "fetched_at": now_dt}
+            try:
+                self.sheets.update_one(
+                    db_key,
+                    {"$set": values, "$setOnInsert": {"_id": f"{day}:{course_id}"}},
+                    upsert=True,
+                )
+            except DuplicateKeyError:
+                self.sheets.update_one(db_key, {"$set": values})
 
     def status(self):
-        last = self.runs.find_one({}, {"_id": 0}, sort=[("day", -1)])
-        if last:
-            for field in ("started_at", "finished_at"):
-                if last.get(field) is not None:
-                    last[field] = last[field].isoformat()
         start, end = self.window()
-        return {"window_start": str(start), "window_end": str(end),
-                "refresh_hour": self.refresh_hour, "timezone": "Europe/Dublin",
-                "storage": "mongodb", "last_run": last}
+        return {
+            "window_start": str(start),
+            "window_end": str(end),
+            "storage": "in_memory",
+            "ttl_seconds": self.ttl_seconds,
+            "timezone": "Europe/Dublin",
+            "cached_entries": len(self._memory_cache),
+            "last_run": None,
+        }
 
     def get(self, day, course_id):
+        """Return cached sheet if fresh within ttl_seconds; otherwise fetch live from BRS."""
         self.check_selection(day, course_id)
-        row = self.sheets.find_one({"day": str(day), "course_id": course_id})
-        if row is None:
-            return None
-        local_now = self.now().astimezone(DUBLIN)
-        due = datetime.combine(local_now.date(), time(self.refresh_hour), DUBLIN)
-        if local_now < due:
-            due -= timedelta(days=1)
-        fetched = row["fetched_at"]
-        return {"data": row["data"], "cache": {
-            "fetched_at": fetched.isoformat(),
-            "stale": fetched < due and fetched.astimezone(DUBLIN).date() != local_now.date(),
-            **self.status(),
-        }}
+        key = (str(day), course_id)
+        now_dt = self.now()
 
-    def refresh(self, retry_failed=False):
-        """Persist the daily claim before network access, including across restarts."""
-        today, end = self.window()
-        run = {"day": str(today), "started_at": self.now(), "finished_at": None,
-               "status": "running", "saved": 0, "errors": []}
-        try:
-            self.runs.insert_one({"_id": str(today), **run})
-            claimed = True
-        except DuplicateKeyError:
-            claimed = False
-            if retry_failed:
-                claimed = self.runs.update_one(
-                    {"_id": str(today), "status": {"$in": ["failed", "partial"]}},
-                    {"$set": run},
-                ).modified_count == 1
-        if not claimed:
-            return self.status()
-        saved, errors = 0, []
-        try:
-            with self.reader_factory() as reader:
-                for offset in range(self.days):
-                    for course_id in COURSES:
-                        if self.stop.is_set():
-                            raise RuntimeError("Refresh interrupted by shutdown")
-                        day = str(today + timedelta(days=offset))
-                        try:
-                            data = reader.fetch(day, course_id)
-                            self.save(day, course_id, data)
-                            saved += 1
-                        except Exception:
-                            logger.exception("Daily BRS refresh failed: %s course %s", day, course_id)
-                            errors.append(f"Could not update {day}, course {course_id}")
-                        # Sequential requests, paced to avoid a burst against BRS.
-                        self.stop.wait(0.25)
-        except Exception:
-            logger.exception("Daily BRS refresh interrupted")
-            errors.append("Daily BRS connection failed or refresh was interrupted")
-        finally:
-            self.runs.update_one({"_id": str(today)}, {"$set": {
-                "finished_at": self.now(),
-                "status": "partial" if errors and saved else "failed" if errors else "complete",
-                "saved": saved, "errors": errors,
-            }})
-            self.sheets.delete_many({"$or": [{"day": {"$lt": str(today)}}, {"day": {"$gt": str(end)}}]})
-            self.runs.delete_many({"_id": {"$lt": str(today - timedelta(days=90))}})
-        return self.status()
+        with self._cache_lock:
+            entry = self._memory_cache.get(key)
+            if entry and (now_dt - entry["fetched_at"]).total_seconds() < self.ttl_seconds:
+                cached_data = entry["data"]
+                fetched_at = entry["fetched_at"]
+                start, end = self.window()
+                return {
+                    "data": cached_data,
+                    "cache": {
+                        "fetched_at": fetched_at.isoformat(),
+                        "stale": False,
+                        "live": True,
+                        "storage": "in_memory",
+                        "ttl_seconds": self.ttl_seconds,
+                        "window_start": str(start),
+                        "window_end": str(end),
+                        "timezone": "Europe/Dublin",
+                        "last_run": None,
+                    },
+                }
+
+        # Not in cache or expired: fetch live from BRS
+        with self.reader_factory() as reader:
+            data = reader.fetch(str(day), course_id)
+
+        fetched_at = self.now()
+        with self._cache_lock:
+            self._memory_cache[key] = {"data": data, "fetched_at": fetched_at}
+
+        start, end = self.window()
+        return {
+            "data": data,
+            "cache": {
+                "fetched_at": fetched_at.isoformat(),
+                "stale": False,
+                "live": True,
+                "storage": "in_memory",
+                "ttl_seconds": self.ttl_seconds,
+                "window_start": str(start),
+                "window_end": str(end),
+                "timezone": "Europe/Dublin",
+                "last_run": None,
+            },
+        }
 
     def revalidate(self, selection):
         self.check_selection(selection.date, selection.course_id)
         amount(selection.price)
-        # Only one extra live-check browser per process; browsing never takes this lock.
         if not self.live_lock.acquire(blocking=False):
             raise BlockingIOError("A booking check is in progress. Please try again shortly.")
         try:
@@ -132,6 +159,7 @@ class TeesheetCache:
             self.save(str(selection.date), selection.course_id, data)
         finally:
             self.live_lock.release()
+
         tee = next((t for t in data["tee_times"] if t["id"] == selection.tee_time_id), None)
         if not tee or sum(s["status"] == "Available" for s in tee["slots"].values()) < selection.players:
             return {"valid": False, "reason": "This tee time is no longer available. Please choose another time."}
@@ -140,33 +168,142 @@ class TeesheetCache:
         if current is None:
             return {"valid": False, "reason": "This rate is no longer available. Please select a rate again."}
         if data["currency_code"] != selection.currency or amount(current) != amount(selection.price):
-            return {"valid": False, "reason": f"The price has changed to {data['currency_code']} {current}. Please return to tee times and select the updated price."}
-        return {"valid": True, "price": current, "currency": data["currency_code"],
-                "teeTime": tee, "greenFee": fee, "course": COURSES[selection.course_id],
-                "checked_at": self.now().isoformat()}
+            return {
+                "valid": False,
+                "reason": (
+                    f"The price has changed to {data['currency_code']} {current}. "
+                    "Please return to tee times and select the updated price."
+                ),
+            }
+        return {
+            "valid": True,
+            "price": current,
+            "currency": data["currency_code"],
+            "teeTime": tee,
+            "greenFee": fee,
+            "course": COURSES[selection.course_id],
+            "checked_at": self.now().isoformat(),
+        }
+
+    def refresh(self, retry_failed=False):
+        """No-op for in-memory real-time cache; returns current status."""
+        return self.status()
 
     def start(self):
-        self.stop.clear()
-
-        def run():
-            handled_day = None
-            while not self.stop.is_set():
-                try:
-                    local_now = self.now().astimezone(DUBLIN)
-                    if local_now.hour >= self.refresh_hour and handled_day != local_now.date():
-                        self.refresh()
-                        handled_day = local_now.date()
-                except PyMongoError as exc:
-                    logger.warning("Daily BRS scheduler MongoDB operation failed (%s); retrying in 60 seconds",
-                                   type(exc).__name__)
-                except Exception:
-                    logger.exception("Daily BRS scheduler failed")
-                self.stop.wait(60)
-
-        self.thread = threading.Thread(target=run, name="brs-daily-refresh", daemon=True)
-        self.thread.start()
+        """No background polling needed for real-time in-memory cache."""
+        pass
 
     def close(self):
+        """Clear the in-memory cache upon shutdown."""
         self.stop.set()
-        if self.thread:
-            self.thread.join(timeout=95)
+        with self._cache_lock:
+            self._memory_cache.clear()
+
+    def get_course_availability(
+        self,
+        day: date,
+        course_id: int,
+        players: Optional[int] = None,
+        time_from: Optional[str] = None,
+        time_to: Optional[str] = None,
+    ) -> BrsCourseAvailabilityResponse:
+        """Query and filter tee-sheet slots and rates across 3 courses with explicit status."""
+        self.check_selection(day, course_id)
+        course_meta = COURSES[course_id]
+
+        if players is not None and not (1 <= players <= 4):
+            raise BrsUnsupportedQueryError("Player count must be between 1 and 4.")
+
+        if time_from and time_to and time_to <= time_from:
+            raise BrsUnsupportedQueryError("time_to must be strictly after time_from.")
+
+        try:
+            sheet_result = self.get(day, course_id)
+            raw_data = sheet_result["data"]
+            source = "brs_api" if sheet_result["cache"].get("live") else "cached_snapshot"
+            retrieved_at = datetime.fromisoformat(sheet_result["cache"]["fetched_at"])
+        except BrsTenantUnconfiguredError:
+            # Explicitly return unconfigured tenant status without treating it as open slots
+            return BrsCourseAvailabilityResponse(
+                course_id=course_id,
+                course_name=course_meta["name"],
+                tenant=course_meta.get("tenant", "stpatricks"),
+                date=day,
+                status="unconfigured_tenant",
+                available_slots_count=0,
+                slots=[],
+                retrieved_at=self.now(),
+                freshness_ttl_seconds=self.ttl_seconds,
+                reserves_inventory=False,
+                source="brs_api",
+            )
+
+        slots: list[BrsTeeSlot] = []
+        currency = raw_data.get("currency_code", "EUR")
+
+        for tee in raw_data.get("tee_times", []):
+            time_str = tee.get("time", "")
+            if not time_str:
+                continue
+
+            if time_from and time_str < time_from:
+                continue
+            if time_to and time_str > time_to:
+                continue
+
+            slot_dict = tee.get("slots", {})
+            available_capacity = sum(1 for s in slot_dict.values() if s.get("status") == "Available")
+
+            if players is not None and available_capacity < players:
+                continue
+
+            rates: list[BrsSlotRate] = []
+            for gf in tee.get("green_fees", []):
+                p_count = players if players is not None else 1
+                price_val = gf.get(f"green_fee{p_count}_ball") or gf.get("green_fee1_ball")
+                if price_val is not None:
+                    try:
+                        norm_price = f"{Decimal(str(price_val)):.2f}"
+                        unit_price = f"{(Decimal(str(price_val)) / p_count):.2f}"
+                    except Exception:
+                        norm_price = str(price_val)
+                        unit_price = str(price_val)
+
+                    rates.append(BrsSlotRate(
+                        rate_id=gf.get("id", 0),
+                        package_name=gf.get("package_name") or gf.get("type") or "Standard Visitor",
+                        players=p_count,
+                        price_per_player=unit_price,
+                        total_price=norm_price,
+                        currency=currency,
+                        num_holes=str(gf.get("num_holes", "18")),
+                        type=gf.get("type", "Visitor"),
+                    ))
+
+            inventory_id = f"BRS-{course_id}-{day.strftime('%Y%m%d')}-{time_str.replace(':', '')}-{tee.get('id', 0)}"
+
+            slots.append(BrsTeeSlot(
+                slot_id=tee.get("id", 0),
+                time=time_str,
+                holes=str(tee.get("holes", "18")),
+                available_capacity=available_capacity,
+                is_available=available_capacity > 0,
+                rates=rates,
+                inventory_id=inventory_id,
+            ))
+
+        status = "available" if slots else "no_availability"
+
+        return BrsCourseAvailabilityResponse(
+            course_id=course_id,
+            course_name=course_meta["name"],
+            tenant=course_meta.get("tenant", "rosapenna"),
+            date=day,
+            status=status,
+            available_slots_count=len(slots),
+            slots=slots,
+            retrieved_at=retrieved_at,
+            freshness_ttl_seconds=self.ttl_seconds,
+            reserves_inventory=False,
+            source=source,
+        )

@@ -11,7 +11,12 @@ from pymongo import ASCENDING, ReturnDocument
 from pymongo.collection import Collection
 from pymongo.errors import DuplicateKeyError
 
-from rosapenna_backend.api.schemas.booking_intents import MAX_ACTIONS, BookingIntentAction, BookingIntentCreate
+from rosapenna_backend.api.schemas.booking_intents import (
+    MAX_ACTIONS,
+    BookingIntentAction,
+    BookingIntentCreate,
+    OperaReservationPayload,
+)
 from rosapenna_backend.integrations.brs.tee_sheet import COURSES
 
 class IntentConflict(ValueError):
@@ -37,6 +42,7 @@ def public_intent(document: dict) -> dict:
         if key not in {"_id", "idempotency_key_hash", "create_fingerprint"}
     }
     result["booking_intent_id"] = document["_id"]
+    result["booking_reference"] = document.get("booking_reference")
     result["actions"] = [
         {key: value for key, value in action.items() if key != "request_fingerprint"}
         for action in document.get("actions", [])
@@ -52,6 +58,16 @@ class BookingIntentStore:
             [("idempotency_key_hash", ASCENDING)],
             unique=True,
             name="uniq_booking_intent_idempotency",
+        )
+        self.collection.create_index(
+            [("booking_reference", ASCENDING)],
+            sparse=True,
+            name="idx_booking_intent_reference",
+        )
+        self.collection.create_index(
+            [("links.opera_reservation.reservation_id", ASCENDING)],
+            sparse=True,
+            name="idx_booking_intent_opera_res",
         )
 
     def create(self, idempotency_key: uuid.UUID, request: BookingIntentCreate) -> tuple[dict, bool]:
@@ -75,8 +91,10 @@ class BookingIntentStore:
             "captured_at": now,
         }
         intent_id = f"bki_{uuid.uuid4().hex}"
+        booking_ref = f"RSP-{selected.date.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
         document = {
             "_id": intent_id,
+            "booking_reference": booking_ref,
             "idempotency_key_hash": key_hash,
             "create_fingerprint": request_fingerprint,
             "source": "website_checkout",
@@ -167,6 +185,44 @@ class BookingIntentStore:
             evidence["quote"] = revalidated.copy()
             update["quote.version"] = quote_version
             update["quote.live_revalidated"] = revalidated
+        elif request.action == "link_opera_reservation":
+            assert request.opera_payload is not None
+            opera_data = request.opera_payload.model_dump(mode="json")
+            existing_opera = document.get("links", {}).get("opera_reservation")
+            if existing_opera and existing_opera.get("reservation_id") == opera_data["reservation_id"]:
+                evidence["idempotent_replay"] = True
+            evidence["opera_reservation"] = opera_data
+            update["links.opera_reservation"] = opera_data
+            update["reservation_state"] = "reserved"
+        elif request.action == "link_brs_round":
+            assert request.brs_payload is not None
+            brs_data = request.brs_payload.model_dump(mode="json")
+            existing_rounds = document.get("links", {}).get("brs_rounds", [])
+            updated_rounds = [r for r in existing_rounds if r.get("round_id") != brs_data["round_id"]]
+            updated_rounds.append(brs_data)
+            evidence["brs_round"] = brs_data
+            update["links.brs_rounds"] = updated_rounds
+        elif request.action == "record_payment":
+            assert request.payment_payload is not None
+            pay_data = request.payment_payload.model_dump(mode="json")
+            existing_payments = document.get("links", {}).get("payments", [])
+            updated_payments = [p for p in existing_payments if p.get("payment_id") != pay_data["payment_id"]]
+            updated_payments.append(pay_data)
+            evidence["payment"] = pay_data
+            update["links.payments"] = updated_payments
+            if pay_data["status"] == "completed":
+                p_state = "deposit_paid" if pay_data["payment_type"] == "deposit" else "fully_paid"
+                update["payment_state"] = p_state
+                if document.get("reservation_state") in {"reserved", "confirmed"} and document.get("links", {}).get("opera_reservation"):
+                    next_stage = "confirmed"
+                    update["reservation_state"] = "confirmed"
+            elif pay_data["status"] == "failed":
+                update["payment_state"] = "payment_failed"
+        elif request.action == "confirm_booking":
+            next_stage = "confirmed"
+            update["reservation_state"] = "confirmed"
+        elif request.action == "mark_recovery_required":
+            next_stage = "recovery_required"
 
         next_revision = request.expected_revision + 1
         event = {
@@ -241,4 +297,91 @@ class BookingIntentStore:
             return "checkout_preparation_blocked", source
         if action == "checkout_preparation_outcome_unknown" and stage == "checkout_preparation_pending":
             return "recovery_required", "brs_checkout"
+        if action == "link_opera_reservation":
+            return stage, "opera_integration"
+        if action == "link_brs_round":
+            return stage, "brs_integration"
+        if action == "record_payment":
+            return stage, "payment_integration"
+        if action == "confirm_booking":
+            return "confirmed", "booking_orchestration"
+        if action == "mark_recovery_required":
+            return "recovery_required", "staff_recovery"
         raise IntentConflict("This booking intent cannot accept that action in its current stage")
+
+    def get_by_reference(self, reference_or_id: str) -> dict:
+        clean = reference_or_id.strip()
+        query = {
+            "$or": [
+                {"_id": clean},
+                {"booking_reference": clean},
+                {"links.opera_reservation.reservation_id": clean},
+                {"links.opera_reservation.confirmation_number": clean},
+            ]
+        }
+        document = self.collection.find_one(query)
+        if document is None:
+            raise IntentNotFound("Booking record was not found")
+        return public_intent(document)
+
+    def link_opera_reservation(
+        self,
+        intent_id: str,
+        expected_revision: int,
+        opera_payload: OperaReservationPayload,
+    ) -> tuple[dict, bool]:
+        """Link an authoritative Opera reservation payload to the booking intent."""
+        action = BookingIntentAction(
+            action_id=uuid.uuid4(),
+            expected_revision=expected_revision,
+            action="link_opera_reservation",
+            opera_payload=opera_payload,
+        )
+        return self.append_action(intent_id, action)
+
+    def link_brs_round(
+        self,
+        intent_id: str,
+        expected_revision: int,
+        brs_payload: BrsRoundPayload,
+        action_id: uuid.UUID | None = None,
+    ) -> tuple[dict, bool]:
+        """Link an authoritative BRS golf round payload to the booking intent."""
+        action = BookingIntentAction(
+            action_id=action_id or uuid.uuid4(),
+            expected_revision=expected_revision,
+            action="link_brs_round",
+            brs_payload=brs_payload,
+        )
+        return self.append_action(intent_id, action)
+
+    def record_payment(
+        self,
+        intent_id: str,
+        expected_revision: int,
+        payment_payload: PaymentRecordPayload,
+        action_id: uuid.UUID | None = None,
+    ) -> tuple[dict, bool]:
+        """Record an authoritative payment transaction in the booking ledger."""
+        action = BookingIntentAction(
+            action_id=action_id or uuid.uuid4(),
+            expected_revision=expected_revision,
+            action="record_payment",
+            payment_payload=payment_payload,
+        )
+        return self.append_action(intent_id, action)
+
+    def mark_recovery_required(
+        self,
+        intent_id: str,
+        expected_revision: int,
+        detail_code: str = "upstream_response_error",
+    ) -> tuple[dict, bool]:
+        """Mark booking intent as requiring manual staff recovery after an ambiguous failure."""
+        action = BookingIntentAction(
+            action_id=uuid.uuid4(),
+            expected_revision=expected_revision,
+            action="mark_recovery_required",
+            detail_code=detail_code,
+        )
+        return self.append_action(intent_id, action)

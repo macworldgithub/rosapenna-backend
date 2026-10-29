@@ -8,7 +8,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from pymongo.errors import PyMongoError
 from starlette.concurrency import run_in_threadpool
 
-from rosapenna_backend.api.routes import availability, booking_intents, bookings, health, staff_operations
+from rosapenna_backend.api.routes import (
+    availability,
+    booking_intents,
+    bookings,
+    communications,
+    golf_rounds,
+    health,
+    packages,
+    rooms,
+    staff_operations,
+)
 from rosapenna_backend.config import settings, validate_security_settings
 from rosapenna_backend.core.display import start_virtual_display, start_vnc_server, stop_virtual_display, stop_vnc_server
 from rosapenna_backend.core.errors import (
@@ -39,8 +49,16 @@ OPENAPI_TAGS = [
                        "filling the form, optionally filling card details and paying.",
     },
     {
+        "name": "rooms",
+        "description": "Hotel room availability and reservation lookups via Oracle Opera Cloud / OHIP.",
+    },
+    {
         "name": "staff operations",
         "description": "Staff operations require external OIDC role validation; unavailable until configured.",
+    },
+    {
+        "name": "communications",
+        "description": "Itinerary rendering, email dispatch, and guest request communication services.",
     },
     {
         "name": "health",
@@ -167,9 +185,13 @@ def create_app() -> FastAPI:
     application.add_exception_handler(PyMongoError, database_exception_handler)
 
     application.include_router(health.router)
+    application.include_router(rooms.router)
     application.include_router(availability.router)
+    application.include_router(golf_rounds.router)
+    application.include_router(packages.router)
     application.include_router(bookings.router)
     application.include_router(booking_intents.router)
+    application.include_router(communications.router)
     application.include_router(staff_operations.router)
     return application
 

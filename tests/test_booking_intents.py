@@ -145,6 +145,99 @@ class BookingIntentTests(unittest.TestCase):
         with self.assertRaises(ValidationError):
             BookingIntentCreate.model_validate(payload)
 
+    def test_linked_booking_records_and_reference_lookups(self):
+        intent, _ = self.store.create(self.key, draft())
+        self.assertIn("booking_reference", intent)
+        booking_ref = intent["booking_reference"]
+        self.assertTrue(booking_ref.startswith("RSP-"))
+
+        # Link Opera hotel reservation
+        updated, added = self.store.append_action(intent["booking_intent_id"], BookingIntentAction.model_validate({
+            "action_id": str(uuid.uuid4()),
+            "action": "link_opera_reservation",
+            "expected_revision": 1,
+            "opera_payload": {
+                "reservation_id": "OPERA-RES-9988",
+                "confirmation_number": "CONF-9988",
+                "hotel_id": "ROSA",
+                "room_category": "DELUXE",
+                "arrival_date": "2027-05-14",
+                "departure_date": "2027-05-17",
+                "total_amount": "990.00",
+                "currency": "EUR",
+                "status": "Reserved",
+            },
+        }))
+        self.assertTrue(added)
+        self.assertEqual(updated["revision"], 2)
+        self.assertEqual(updated["reservation_state"], "reserved")
+        self.assertEqual(updated["links"]["opera_reservation"]["reservation_id"], "OPERA-RES-9988")
+
+        # Link BRS golf round
+        updated2, added2 = self.store.append_action(intent["booking_intent_id"], BookingIntentAction.model_validate({
+            "action_id": str(uuid.uuid4()),
+            "action": "link_brs_round",
+            "expected_revision": 2,
+            "brs_payload": {
+                "round_id": "round_1",
+                "course_id": 1,
+                "course_name": "Old Tom Morris Links",
+                "date": "2027-05-15",
+                "time": "10:30",
+                "holes": "18",
+                "players": 2,
+                "brs_booking_id": "BRS-BK-1001",
+                "price": "320.00",
+                "currency": "EUR",
+                "status": "Reserved",
+            },
+        }))
+        self.assertTrue(added2)
+        self.assertEqual(len(updated2["links"]["brs_rounds"]), 1)
+
+        # Record verified payment
+        updated3, added3 = self.store.append_action(intent["booking_intent_id"], BookingIntentAction.model_validate({
+            "action_id": str(uuid.uuid4()),
+            "action": "record_payment",
+            "expected_revision": 3,
+            "payment_payload": {
+                "payment_id": "PAY-BOIPA-5566",
+                "provider": "boipa",
+                "payment_type": "deposit",
+                "amount": "327.50",
+                "currency": "EUR",
+                "status": "completed",
+                "provider_reference": "TXN_BOIPA_REF_123",
+            },
+        }))
+        self.assertTrue(added3)
+        self.assertEqual(updated3["payment_state"], "deposit_paid")
+        self.assertEqual(updated3["stage"], "confirmed")
+        self.assertEqual(updated3["reservation_state"], "confirmed")
+
+        # Lookup by booking reference
+        by_ref = self.store.get_by_reference(booking_ref)
+        self.assertEqual(by_ref["booking_intent_id"], intent["booking_intent_id"])
+
+        # Lookup by Opera reservation ID
+        by_opera = self.store.get_by_reference("OPERA-RES-9988")
+        self.assertEqual(by_opera["booking_intent_id"], intent["booking_intent_id"])
+
+        # Lookup by Opera confirmation number
+        by_conf = self.store.get_by_reference("CONF-9988")
+        self.assertEqual(by_conf["booking_intent_id"], intent["booking_intent_id"])
+
+        # Recovery transition preserves all linked evidence
+        updated4, _ = self.store.append_action(intent["booking_intent_id"], BookingIntentAction.model_validate({
+            "action_id": str(uuid.uuid4()),
+            "action": "mark_recovery_required",
+            "expected_revision": 4,
+        }))
+        self.assertEqual(updated4["stage"], "recovery_required")
+        self.assertEqual(updated4["links"]["opera_reservation"]["reservation_id"], "OPERA-RES-9988")
+        self.assertEqual(len(updated4["links"]["brs_rounds"]), 1)
+        self.assertEqual(len(updated4["links"]["payments"]), 1)
+
     def test_database_has_a_unique_idempotency_index(self):
         indexes = self.collection.index_information()
         self.assertTrue(indexes["uniq_booking_intent_idempotency"]["unique"])

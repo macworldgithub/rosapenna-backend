@@ -10,6 +10,7 @@ dependencies = [
     "pydantic>=2.14.1",
     "pydantic-settings>=2.15.0",
     "pymongo>=4.18,<5",
+    "reportlab>=5.1.0",
     "tzdata>=2026.5",
     "uvicorn[standard]>=0.54.0",
 ]
