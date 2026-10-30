@@ -206,3 +206,120 @@ class UpdatePackageRulesRequest(BaseModel):
     category_buffers: Optional[Dict[str, int]] = None
     deposit_percent: Optional[int] = Field(default=None, ge=0, le=100)
     balance_due_weeks: Optional[int] = Field(default=None, ge=1, le=12)
+
+
+class PackageSearchRequest(BaseModel):
+    """Request payload for live Stay & Play search combining rooms and tee times."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    arrival_date: dt.date
+    departure_date: dt.date
+    party_size: int = Field(default=2, ge=1, le=16)
+    room_count: int = Field(default=1, ge=1, le=10)
+    bed_type: Literal["TWIN", "DOUBLE", "SINGLE"] = "TWIN"
+    preferred_room_category: Optional[str] = Field(default=None, max_length=50)
+    preferred_courses: List[int] = Field(default_factory=lambda: [1, 3, 4])
+    residence_country: Optional[str] = Field(default="IE", max_length=10)
+    has_golf_ireland_index: bool = False
+
+    @model_validator(mode="after")
+    def validate_search_stay(self):
+        if self.departure_date <= self.arrival_date:
+            raise ValueError("departure_date must be strictly after arrival_date")
+        for cid in self.preferred_courses:
+            if cid not in COURSES:
+                raise ValueError(f"Unsupported course_id {cid}. Supported: {list(COURSES.keys())}")
+        return self
+
+
+class AvailableRoomCategoryOption(BaseModel):
+    """Available room category option with live rate and inventory."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    room_category: str
+    category_name: str
+    available_rooms: int
+    rate_per_night: str
+    subtotal: str
+    breakfast_included: bool = True
+    is_available: bool
+
+    @field_validator("rate_per_night", "subtotal")
+    @classmethod
+    def normalize_prices(cls, value: str) -> str:
+        return _price(value)
+
+
+class AvailableTeeSlotOption(BaseModel):
+    """Available live tee time slot for a course and date."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    time: str
+    available_slots: int
+    rate_per_player: str
+    is_hot_deal: bool = False
+
+    @field_validator("rate_per_player")
+    @classmethod
+    def normalize_prices(cls, value: str) -> str:
+        return _price(value)
+
+
+class DailyCourseTeeTimes(BaseModel):
+    """Tee time availability for a specific course and date."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    date: dt.date
+    course_id: int
+    course_name: str
+    is_closed: bool = False
+    closure_reason: Optional[str] = None
+    alternative_suggestion: Optional[str] = None
+    available_slots_count: int = 0
+    tee_slots: List[AvailableTeeSlotOption] = Field(default_factory=list)
+
+
+class RecommendedPackageOption(BaseModel):
+    """Recommended complete package itinerary combining room and golf."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    name: str
+    room_category: str
+    selected_courses: List[str]
+    total_price: str
+    deposit_amount: str
+    balance_amount: str
+    balance_due_date: dt.date
+
+    @field_validator("total_price", "deposit_amount", "balance_amount")
+    @classmethod
+    def normalize_prices(cls, value: str) -> str:
+        return _price(value)
+
+
+class PackageSearchResponse(BaseModel):
+    """Response payload for live Stay & Play search."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    search_id: str
+    status: Literal["available", "ineligible", "unavailable", "partial"]
+    arrival_date: dt.date
+    departure_date: dt.date
+    nights: int
+    party_size: int
+    room_count: int
+    is_golf_ireland_eligible: bool
+    required_minimum_rounds: int
+    room_options: List[AvailableRoomCategoryOption] = Field(default_factory=list)
+    daily_golf_options: List[DailyCourseTeeTimes] = Field(default_factory=list)
+    recommended_packages: List[RecommendedPackageOption] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
+    reserves_inventory: bool = False
+    freshness_ttl_seconds: int = 120
+    created_at: str

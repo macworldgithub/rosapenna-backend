@@ -9,6 +9,8 @@ from rosapenna_backend.api.schemas.packages import (
     PackageQuoteRequest,
     PackageQuoteResponse,
     PackageRulesConfig,
+    PackageSearchRequest,
+    PackageSearchResponse,
     UpdatePackageRulesRequest,
 )
 from rosapenna_backend.api.security import COMMON_DEPS
@@ -29,6 +31,19 @@ def calculate_package_quote(
 ):
     quote = pricing_service.calculate_quote(request)
     return quote
+
+
+@router.post(
+    "/search",
+    response_model=PackageSearchResponse,
+    summary="Search live Stay & Play availability combining Opera rooms and BRS tee times",
+    description="Combines live hotel room inventory and tee sheets across all three courses without reserving inventory.",
+)
+def search_packages(
+    request: PackageSearchRequest,
+    pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+):
+    return pricing_service.search_stay_and_golf(request)
 
 
 @router.get(

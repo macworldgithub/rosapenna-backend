@@ -335,6 +335,10 @@ class OperaClient:
                 rates=rates_data,
             ))
 
+        has_any_rates = any(len(c.rates) > 0 for c in categories)
+        if (not categories or not has_any_rates) and self.settings.enable_mock_fallback:
+            return self._generate_fixture_availability(arrival, departure, adults, children)
+
         return RoomAvailabilityResponse(
             hotel_id=self.settings.hotel_id,
             arrival_date=arrival,
