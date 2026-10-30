@@ -10,3 +10,4 @@ __pycache__
 state/
 .temp/
 .uv-cache/
+booking_api.log

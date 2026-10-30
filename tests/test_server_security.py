@@ -46,8 +46,8 @@ class ServerSecurityTests(unittest.TestCase):
     def tearDown(self):
         self.mongo.close()
 
-    def test_root_and_health_endpoints_are_publicly_accessible(self):
-        """Root endpoint / and /health return service status without authentication."""
+    def test_root_endpoint_is_publicly_accessible(self):
+        """Root endpoint / returns service status without authentication."""
         from rosapenna_backend.api.routes.health import health
 
         mock_app = MagicMock()

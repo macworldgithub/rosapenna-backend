@@ -80,7 +80,7 @@ frontend configuration, never in browser code.
 
 | Access class | Routes | What access means |
 |---|---|---|
-| Public probe | `GET /health`, `GET /health/ready` | Liveness and database readiness only. |
+| Public probe | `GET /`, `GET /ready` (or `/health/ready`) | Liveness and database readiness only. |
 | API documentation | `GET /docs`, `GET /redoc`, `GET /openapi.json` when enabled | Public in development when `BOOKING_DOCS_ENABLED=true`; production startup requires this setting to be false. |
 | Backend service | `POST /available-times`, `POST /bookings`, `GET /bookings/{session_id}`, `POST /bookings/{session_id}/close`, `GET /teesheets`, `GET /teesheets/status`, `POST /teesheets/revalidate`, and all `/booking-intents` routes | Requires the backend service key and rate limit. Intended for trusted server-side callers; the key itself does not identify or restrict the caller. |
 | Authenticated guest | None | Guest accounts or guest sessions are not implemented by this API. |
@@ -96,8 +96,8 @@ store them in local storage.
 
 | Method and path | Purpose | Access |
 |---|---|---|
-| `GET /health` | Check service status and active session count. | None |
-| `GET /health/ready` | Ping MongoDB; returns `ready` or HTTP 503. | None |
+| `GET /` | Check service status and active session count. | None |
+| `GET /ready` | Ping MongoDB; returns `ready` or HTTP 503. | None |
 | `POST /available-times` | Scrape tee times for a course and date. | `X-API-Key` and rate limit |
 | `POST /bookings` | Start the booking form automation. | `X-API-Key` and rate limit |
 | `GET /bookings/{session_id}` | Check a booking session's status and log. | `X-API-Key` and rate limit |
@@ -107,7 +107,7 @@ store them in local storage.
 | `POST /teesheets/refresh` | Run or retry the daily refresh. | API key and rate limit; external OIDC role validation is pending (currently HTTP 503) |
 | `POST /teesheets/revalidate` | Check a selected quote with BRS. | API key and rate limit |
 
-The API key is a shared service credential. It does not identify individual staff or provide staff roles. `/health` and `/health/ready` remain public probes. Browser automation accepts only HTTPS Rosapenna pages on `visitors.brsgolf.com`; attempted main-frame redirects to other destinations are blocked.
+The API key is a shared service credential. It does not identify individual staff or provide staff roles. `GET /` and `/ready` remain public probes. Browser automation accepts only HTTPS Rosapenna pages on `visitors.brsgolf.com`; attempted main-frame redirects to other destinations are blocked.
 
 For protected endpoints, send the header:
 
@@ -227,7 +227,7 @@ An existing frontend `MONGODB_URI` is unused and can be removed. Never name it
 The service creates one pooled PyMongo client per process, pings MongoDB before
 startup, ensures the cache indexes, and closes the client after background work
 stops on shutdown. It uses acknowledged majority writes. Database failures on
-cache requests return HTTP 503 with a safe retry message; `/health` is a liveness
+cache requests return HTTP 503 with a safe retry message; `GET /` is a liveness
 probe and `/health/ready` checks the database connection. Neither exposes the URI.
 
 Current collections:

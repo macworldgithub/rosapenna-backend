@@ -13,12 +13,6 @@ router = APIRouter()
     tags=["health"],
     summary="Root service status probe",
     description="Returns basic service status and session load on the root backend host. No API key required.",
-)
-@router.get(
-    "/health",
-    tags=["health"],
-    summary="Service liveness probe",
-    description="Returns basic service status. No API key required.",
     response_description="Service status and current session load.",
 )
 def health(request: Request):
@@ -33,9 +27,15 @@ def health(request: Request):
 
 
 @router.get(
-    "/health/ready",
+    "/ready",
     tags=["health"],
     summary="Check MongoDB readiness",
+    responses={503: {"description": "MongoDB is unavailable"}},
+)
+@router.get(
+    "/health/ready",
+    tags=["health"],
+    summary="Check MongoDB readiness (legacy path)",
     responses={503: {"description": "MongoDB is unavailable"}},
 )
 def readiness(request: Request):
