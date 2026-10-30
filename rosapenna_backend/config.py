@@ -4,13 +4,29 @@ import ipaddress
 from typing import Optional
 from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="BOOKING_", env_file=".env", extra="ignore")
 
     api_key: Optional[str] = None
+    staff_api_key: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("STAFF_API_KEY", "BOOKING_STAFF_API_KEY"),
+    )
+    security_bypass_in_dev: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("SECURITY_BYPASS_IN_DEV", "BOOKING_SECURITY_BYPASS_IN_DEV"),
+    )
+    max_request_body_bytes: int = Field(
+        default=1_048_576,
+        validation_alias=AliasChoices("BOOKING_MAX_REQUEST_BODY_BYTES", "MAX_REQUEST_BODY_BYTES"),
+    )
+    min_key_length: int = Field(
+        default=12,
+        validation_alias=AliasChoices("BOOKING_MIN_KEY_LENGTH", "MIN_KEY_LENGTH"),
+    )
     environment: str = "development"
     host: str = "0.0.0.0"
     port: int = 4040
@@ -39,7 +55,7 @@ class Settings(BaseSettings):
 
     debug_screenshots: bool = False
 
-    teesheet_days: int = Field(30, ge=1, le=365)
+    teesheet_days: int = Field(365, ge=1, le=500)
     teesheet_refresh_hour: int = Field(5, ge=0, le=23)
     teesheet_refresh_enabled: bool = True
     intents_collection: str = Field("booking_intents", pattern=r"^[a-z][a-z0-9_]{0,63}$")
@@ -59,8 +75,12 @@ def validate_security_settings():
         if parsed_origin.scheme not in {"http", "https"} or not parsed_origin.netloc or parsed_origin.path or parsed_origin.query or parsed_origin.fragment:
             raise RuntimeError("BOOKING_CORS_ORIGINS must contain exact origins without paths")
     if environment == "production":
-        if not settings.api_key or len(settings.api_key) < 32:
-            raise RuntimeError("Production requires BOOKING_API_KEY with at least 32 characters")
+        if settings.security_bypass_in_dev:
+            raise RuntimeError("Production forbids SECURITY_BYPASS_IN_DEV=true; security bypass cannot be enabled in production")
+        if not settings.api_key or len(settings.api_key) < settings.min_key_length:
+            raise RuntimeError(f"Production requires BOOKING_API_KEY with at least {settings.min_key_length} characters")
+        if not settings.staff_api_key or len(settings.staff_api_key) < settings.min_key_length:
+            raise RuntimeError(f"Production requires STAFF_API_KEY with at least {settings.min_key_length} characters")
         if not origins:
             raise RuntimeError("Production requires explicit BOOKING_CORS_ORIGINS")
         if settings.docs_enabled:

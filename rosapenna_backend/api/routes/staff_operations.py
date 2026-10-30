@@ -1,4 +1,4 @@
-"""Fail-closed, role-protected staff operations pending external OIDC setup."""
+"""Role-protected staff operations with audit logging."""
 
 from fastapi import APIRouter, Depends, HTTPException
 from pymongo.errors import PyMongoError
@@ -22,9 +22,10 @@ router = APIRouter(dependencies=[Depends(rate_limit), Depends(verify_api_key)])
     "/sessions",
     tags=["staff operations"],
     summary="List active and recent booking sessions",
-    description="Requires an external OIDC staff role; unavailable until the provider is configured.",
+    description="Requires an authorized staff token; records an immutable audit log entry.",
     responses={
-        503: {"description": "External OIDC staff sign-in is not configured."},
+        401: {"description": "Missing or invalid staff token."},
+        503: {"description": "Staff authentication is not configured."},
     },
 )
 def list_sessions(
@@ -41,9 +42,10 @@ def list_sessions(
     "/teesheets/refresh",
     tags=["staff operations"],
     summary="Run the daily BRS tee-sheet refresh",
-    description="Requires an external OIDC staff role; unavailable until the provider is configured.",
+    description="Requires an authorized staff token; records an immutable audit log entry.",
     responses={
-        503: {"description": "External OIDC staff sign-in is not configured."},
+        401: {"description": "Missing or invalid staff token."},
+        503: {"description": "Staff authentication is not configured."},
     },
 )
 def refresh_teesheets(

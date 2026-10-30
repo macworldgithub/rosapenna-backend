@@ -209,7 +209,8 @@ class ThreeCourseAvailabilityTests(unittest.TestCase):
 
         self.assertIn(4, COURSES)
         self.assertEqual(COURSES[4]["name"], "St Patrick's Links")
-        self.assertEqual(COURSES[4]["tenant"], "stpatricks")
+        self.assertEqual(COURSES[4]["tenant"], "stpatrickslinks")
+        self.assertEqual(COURSES[4]["external_course_id"], 1)
 
     def test_three_course_availability_reads(self):
         """Querying Old Tom, Sandy Hills, and St Patrick's returns structured availability."""

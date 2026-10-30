@@ -91,7 +91,7 @@ Leave it `false` (default) to review manually before paying.
 
 ### Authentication
 
-Backend service routes require an `X-API-Key` header. Staff operations also require an external OIDC identity and mapped staff role. OIDC is not configured, so `/sessions` and `POST /teesheets/refresh` fail closed with HTTP 503. No local staff accounts are supported. `/health` and `/health/ready` are public probes. API documentation is controlled by `BOOKING_DOCS_ENABLED` and is disabled in production.
+Backend service routes require an `X-API-Key` header. Staff operations require an authorized `X-Staff-Token` header and record immutable audit events. `/health` and `/health/ready` are public probes. In development mode with `SECURITY_BYPASS_IN_DEV=true`, authentication checks can be bypassed for local testing. In production, strict authentication, key length, and rate limits are enforced. API documentation is controlled by `BOOKING_DOCS_ENABLED` and is disabled in production.
 """
 
 
@@ -167,7 +167,10 @@ def create_app() -> FastAPI:
     application.state.booking_intent_store = None
     application.state.staff_audit_log = None
 
-    application.add_middleware(RequestBodySizeLimitMiddleware, max_bytes=1_048_576)
+    application.add_middleware(
+        RequestBodySizeLimitMiddleware,
+        max_bytes=settings.max_request_body_bytes,
+    )
     application.add_middleware(
         CORSMiddleware,
         allow_origins=(

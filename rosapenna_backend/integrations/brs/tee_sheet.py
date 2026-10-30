@@ -62,6 +62,7 @@ COURSES = {
         "name": "Old Tom Morris Links",
         "slug": "old-tom-morris",
         "tenant": "rosapenna",
+        "external_course_id": 1,
         "playing_time": "4h 15m",
         "colour": "",
     },
@@ -71,6 +72,7 @@ COURSES = {
         "name": "Sandy Hills Links",
         "slug": "sandy-hills",
         "tenant": "rosapenna",
+        "external_course_id": 3,
         "playing_time": "4h 30m",
         "colour": "3",
     },
@@ -79,7 +81,8 @@ COURSES = {
         "facilities_id": 5897,
         "name": "St Patrick's Links",
         "slug": "st-patricks",
-        "tenant": "stpatricks",
+        "tenant": "stpatrickslinks",
+        "external_course_id": 1,
         "playing_time": "4h 30m",
         "colour": "4",
     },
@@ -151,13 +154,14 @@ class BrsReader:
 
         course_meta = COURSES[course_id]
         tenant = course_meta.get("tenant", "rosapenna")
+        external_course_id = course_meta.get("external_course_id", course_id)
 
         headers = dict(self.headers)
         if tenant != "rosapenna":
             headers["X-Club-ID"] = tenant
             headers["Referer"] = f"https://visitors.brsgolf.com/{tenant}"
 
-        params = urllib.parse.urlencode({"date": str(day), "course_id": course_id})
+        params = urllib.parse.urlencode({"date": str(day), "course_id": external_course_id})
         url = f"{BRS_API_BASE}?{params}"
         req = urllib.request.Request(url, headers=headers, method="GET")
         try:

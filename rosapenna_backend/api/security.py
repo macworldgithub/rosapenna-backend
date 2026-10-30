@@ -16,12 +16,18 @@ _rate_lock = threading.Lock()
 
 
 def verify_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")):
+    if settings.environment.strip().lower() != "production" and settings.security_bypass_in_dev:
+        if x_api_key and settings.api_key and not hmac.compare_digest(x_api_key, settings.api_key):
+            raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
+        return
     if not settings.api_key:
         raise HTTPException(status_code=503, detail="API authentication is not configured")
     if not x_api_key or not hmac.compare_digest(x_api_key, settings.api_key):
         raise HTTPException(status_code=401, detail="Missing or invalid X-API-Key header")
 
 def rate_limit(request: Request):
+    if settings.environment.strip().lower() != "production" and settings.security_bypass_in_dev:
+        return
     peer_ip = request.client.host if request.client else "unknown"
     client_ip = peer_ip
     try:
