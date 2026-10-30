@@ -14,7 +14,7 @@ def validate_brs_url(value: str) -> str:
             and parsed.port in (None, 443)
             and parsed.username is None
             and parsed.password is None
-            and parsed.path.rstrip("/") == "/rosapenna"
+            and parsed.path.rstrip("/") in ("/rosapenna", "/stpatrickslinks")
         )
     except ValueError:
         valid = False
