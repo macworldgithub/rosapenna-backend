@@ -61,6 +61,8 @@ class PackageQuoteRequest(BaseModel):
     departure_date: dt.date
     rooms: List[RoomSelectionQuoteRequest] = Field(default_factory=list)
     golf_rounds: List[GolfRoundQuoteRequest] = Field(default_factory=list)
+    residence_country: Optional[str] = Field(default="IE", max_length=10)
+    has_golf_ireland_index: bool = False
     existing_booking_intent_id: Optional[str] = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
@@ -102,6 +104,7 @@ class ItemizedGolfRoundQuote(BaseModel):
     players: int
     rate_per_player: str
     subtotal: str
+    rate_basis: str = "Standard Visitor Rate"
     available_slots: int
 
     @field_validator("rate_per_player", "subtotal")
@@ -148,9 +151,15 @@ class PackageQuoteResponse(BaseModel):
     deposit_amount: str = "0.00"
     balance_amount: str = "0.00"
     balance_due_date: dt.date
+    terms_version: str = "terms-v1-20261014"
+    deposit_percent: int = 25
+    balance_percent: int = 75
+    rate_basis_summary: str = "Standard Visitor Rate"
+    is_golf_ireland_eligible: bool = False
     amendment_summary: Optional[AmendmentPaymentSummary] = None
     reserves_inventory: bool = False
     freshness_ttl_seconds: int = 120
+    expires_at: Optional[str] = None
     created_at: str
     errors: List[str] = Field(default_factory=list)
 
@@ -323,3 +332,69 @@ class PackageSearchResponse(BaseModel):
     reserves_inventory: bool = False
     freshness_ttl_seconds: int = 120
     created_at: str
+
+
+class PackagePaymentLinkRequest(BaseModel):
+    """Request to create a scoped 25% deposit payment link bound to quote and guest."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    quote_id: str = Field(min_length=1, max_length=100)
+    lead_first_name: str = Field(min_length=1, max_length=100)
+    lead_last_name: str = Field(min_length=1, max_length=100)
+    lead_email: str = Field(min_length=3, max_length=254)
+    lead_phone: str = Field(min_length=6, max_length=40)
+    residence_country: str = Field(default="IE", min_length=2, max_length=10)
+    accepted_terms: bool = Field(strict=True)
+    special_requests: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("accepted_terms")
+    @classmethod
+    def require_terms_acceptance(cls, value: bool) -> bool:
+        if not value:
+            raise ValueError("Terms and conditions must be explicitly accepted to create a payment link")
+        return value
+
+
+class PackagePaymentLinkResponse(BaseModel):
+    """Scoped payment link and unpaid-link lifecycle tracking (Ticket N05)."""
+
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    payment_id: str
+    booking_intent_id: str
+    booking_reference: str
+    quote_id: str
+    rules_version: str
+    amount: str
+    currency: str = "EUR"
+    status: Literal["draft", "unpaid", "pending", "verified_paid", "failed", "expired"]
+    payment_url: str
+    expires_at: str
+    reminder_at: str
+    reserves_inventory: bool = False
+    created_at: str
+
+    @field_validator("amount")
+    @classmethod
+    def normalize_prices(cls, value: str) -> str:
+        return _price(value)
+
+
+class PaymentCallbackRequest(BaseModel):
+    """Webhook callback delivered by payment provider."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    payment_id: str
+    transaction_id: str
+    status: Literal["paid", "completed", "failed", "cancelled", "expired"]
+    amount: str
+    currency: str = "EUR"
+    timestamp: int
+    provider_signature: str
+
+    @field_validator("amount")
+    @classmethod
+    def normalize_prices(cls, value: str) -> str:
+        return _price(value)

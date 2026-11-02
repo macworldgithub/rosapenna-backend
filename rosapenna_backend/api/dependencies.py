@@ -8,6 +8,7 @@ from rosapenna_backend.integrations.opera.client import OperaClient
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
+from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.package_pricing import PackagePricingService
 from rosapenna_backend.services.staff_audit import StaffAuditLog
 from rosapenna_backend.services.tee_sheets import TeesheetCache
@@ -81,4 +82,28 @@ def get_email_delivery_service(request: Request) -> EmailDeliveryService:
         service = EmailDeliveryService()
         request.app.state.email_delivery_service = service
     return service
+
+
+def get_mmb_gate_service(request: Request) -> MmbGateService:
+    service = getattr(request.app.state, "mmb_gate_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        settings = getattr(request.app.state, "settings", None)
+        service = MmbGateService(database=db, settings=settings)
+        request.app.state.mmb_gate_service = service
+    return service
+
+
+def require_mmb_enabled(
+    request: Request,
+) -> None:
+    """Enforce that Manage My Booking is explicitly enabled before permitting guest amendment operations."""
+    service = get_mmb_gate_service(request)
+    if not service.is_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Manage My Booking is currently unavailable.",
+            headers={"Retry-After": "300"},
+        )
+
 

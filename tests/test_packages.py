@@ -368,6 +368,169 @@ class PackageRouteHandlerTests(unittest.TestCase):
     def tearDown(self):
         self.mongo.close()
 
+    def test_quote_terms_version_and_expiry_generation(self):
+        """Ticket N04: Quote generates terms version, expiry timestamp, and dual-fact rate basis."""
+        req = PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+            residence_country="IE",
+            has_golf_ireland_index=True,
+        )
+        res = self.service.calculate_quote(req)
+        self.assertEqual(res.status, "available")
+        self.assertEqual(res.terms_version, "terms-v1-20261014")
+        self.assertTrue(res.is_golf_ireland_eligible)
+        self.assertIn("Golf Ireland Resident Rate", res.rate_basis_summary)
+        self.assertIsNotNone(res.expires_at)
+        self.assertFalse(res.reserves_inventory)
+
+        # Stored in quote cache
+        stored = self.service.get_quote(res.quote_id)
+        self.assertIsNotNone(stored)
+        self.assertEqual(stored.quote_id, res.quote_id)
+
+    def test_stale_expired_quote_invalidation(self):
+        """Ticket N04: Stale quotes past TTL are identified as expired."""
+        req = PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+        )
+        res = self.service.calculate_quote(req)
+        # Mock expires_at to the past
+        past_time = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=10)
+        res.expires_at = past_time.isoformat()
+        self.assertTrue(self.service.is_quote_expired(res))
+
+    def test_payment_link_requires_explicit_terms_acceptance(self):
+        """Ticket N05: Payment link creation requires explicit terms acceptance."""
+        from rosapenna_backend.api.schemas.packages import PackagePaymentLinkRequest
+        req = PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+        )
+        quote = self.service.calculate_quote(req)
+
+        # Attempt to create request with accepted_terms=False raises validation error
+        with self.assertRaises(ValueError):
+            PackagePaymentLinkRequest(
+                quote_id=quote.quote_id,
+                lead_first_name="Jane",
+                lead_last_name="Doe",
+                lead_email="jane@example.com",
+                lead_phone="+353871234567",
+                accepted_terms=False,
+            )
+
+    def test_payment_link_creation_and_lifecycle(self):
+        """Ticket N05: Scoped payment link binds 25% deposit, 7-day expiry, 5-day reminder, 0 inventory."""
+        from rosapenna_backend.api.schemas.packages import PackagePaymentLinkRequest, PaymentCallbackRequest
+        import hashlib
+        import hmac
+
+        req = PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+        )
+        quote = self.service.calculate_quote(req)
+
+        link_req = PackagePaymentLinkRequest(
+            quote_id=quote.quote_id,
+            lead_first_name="Jane",
+            lead_last_name="Doe",
+            lead_email="jane@example.com",
+            lead_phone="+353871234567",
+            accepted_terms=True,
+        )
+        link_res = self.service.create_payment_link(link_req)
+
+        self.assertEqual(link_res.amount, quote.deposit_amount)
+        self.assertEqual(link_res.currency, "EUR")
+        self.assertEqual(link_res.status, "unpaid")
+        self.assertFalse(link_res.reserves_inventory)
+
+        # Verify 7-day expiry and 5-day reminder
+        now = dt.datetime.now(dt.timezone.utc)
+        exp_dt = dt.datetime.fromisoformat(link_res.expires_at)
+        rem_dt = dt.datetime.fromisoformat(link_res.reminder_at)
+        self.assertTrue(exp_dt > now + dt.timedelta(days=6))
+        self.assertTrue(rem_dt > now + dt.timedelta(days=4))
+
+        # Test HMAC webhook signature validation
+        secret = "rosapenna-dev-webhook-secret-key"
+        now_ts = int(now.timestamp())
+        payload_str = f"{link_res.payment_id}:txn-999:completed:{link_res.amount}:{now_ts}"
+        valid_sig = hmac.new(secret.encode(), payload_str.encode(), hashlib.sha256).hexdigest()
+
+        # 1. Invalid signature rejected
+        bad_cb = PaymentCallbackRequest(
+            payment_id=link_res.payment_id,
+            transaction_id="txn-999",
+            status="completed",
+            amount=link_res.amount,
+            currency="EUR",
+            timestamp=now_ts,
+            provider_signature="invalid-hex-sig",
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.service.process_payment_callback(bad_cb, secret)
+        self.assertIn("Invalid provider signature", str(ctx.exception))
+
+        # 2. Timestamp replay protection rejected (> 300 seconds)
+        old_ts = now_ts - 500
+        old_payload_str = f"{link_res.payment_id}:txn-999:completed:{link_res.amount}:{old_ts}"
+        old_sig = hmac.new(secret.encode(), old_payload_str.encode(), hashlib.sha256).hexdigest()
+        replayed_cb = PaymentCallbackRequest(
+            payment_id=link_res.payment_id,
+            transaction_id="txn-999",
+            status="completed",
+            amount=link_res.amount,
+            currency="EUR",
+            timestamp=old_ts,
+            provider_signature=old_sig,
+        )
+        with self.assertRaises(ValueError) as ctx:
+            self.service.process_payment_callback(replayed_cb, secret)
+        self.assertIn("timestamp is expired", str(ctx.exception))
+
+        # 3. Valid callback marks verified_paid
+        good_cb = PaymentCallbackRequest(
+            payment_id=link_res.payment_id,
+            transaction_id="txn-999",
+            status="completed",
+            amount=link_res.amount,
+            currency="EUR",
+            timestamp=now_ts,
+            provider_signature=valid_sig,
+        )
+        cb_res = self.service.process_payment_callback(good_cb, secret)
+        self.assertEqual(cb_res["status"], "success")
+        self.assertEqual(cb_res["payment_state"], "verified_paid")
+        self.assertFalse(cb_res["reserves_inventory"])
+
+        # 4. Duplicate callback returns idempotent already_processed
+        dup_res = self.service.process_payment_callback(good_cb, secret)
+        self.assertEqual(dup_res["status"], "already_processed")
+
     def test_route_calculate_package_quote(self):
         req = PackageQuoteRequest(
             arrival_date=dt.date(2027, 6, 10),

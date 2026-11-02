@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import hmac
+import os
 import uuid
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -17,11 +20,14 @@ from rosapenna_backend.api.schemas.packages import (
     ItemizedGolfRoundQuote,
     ItemizedRoomQuote,
     MinimumRoundsRule,
+    PackagePaymentLinkRequest,
+    PackagePaymentLinkResponse,
     PackageQuoteRequest,
     PackageQuoteResponse,
     PackageRulesConfig,
     PackageSearchRequest,
     PackageSearchResponse,
+    PaymentCallbackRequest,
     RecommendedPackageOption,
     UpdatePackageRulesRequest,
 )
@@ -47,7 +53,11 @@ class PackagePricingService:
         self.booking_store = booking_store
         self.db = database
         self.rules_collection = database["package_rules"] if database is not None else None
+        self.quotes_collection = database["package_quotes"] if database is not None else None
+        self.payments_collection = database["package_payments"] if database is not None else None
         self._cached_rules: Optional[PackageRulesConfig] = None
+        self._quotes_cache: Dict[str, dict] = {}
+        self._payments_cache: Dict[str, dict] = {}
 
     def get_rules(self) -> PackageRulesConfig:
         """Retrieve active package rules configuration."""
@@ -349,6 +359,13 @@ class PackagePricingService:
             created_at=now_str,
         )
 
+    def _cache_and_return_quote(self, quote: PackageQuoteResponse) -> PackageQuoteResponse:
+        """Cache a quote (available, unavailable, or ineligible) so it can be retrieved and inspected."""
+        self._quotes_cache[quote.quote_id] = quote.model_dump(mode="json")
+        if self.quotes_collection is not None:
+            self.quotes_collection.insert_one(quote.model_dump(mode="json"))
+        return quote
+
     def calculate_quote(self, request: PackageQuoteRequest) -> PackageQuoteResponse:
         """Calculate a live, itemized package quote combining Opera room rates and BRS golf rates."""
         rules = self.get_rules()
@@ -359,42 +376,48 @@ class PackagePricingService:
 
         # 1. Eligibility Check: Require accommodation
         if not request.rooms:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="ineligible",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=["Stay & Play packages require accommodation and golf. For golf-only, please use standalone tee times."],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="ineligible",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=["Stay & Play packages require accommodation and golf. For golf-only, please use standalone tee times."],
+                )
             )
 
         # 2. Eligibility Check: Stay length
         if nights < 2:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="ineligible",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=["Stay & Play packages require a minimum stay of 2 nights."],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="ineligible",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=["Stay & Play packages require a minimum stay of 2 nights."],
+                )
             )
         if nights > 5:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="ineligible",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=["Stays longer than 5 nights require bespoke staff review. Please contact Reservations."],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="ineligible",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=["Stays longer than 5 nights require bespoke staff review. Please contact Reservations."],
+                )
             )
 
         # 3. Eligibility Check: Minimum golf rounds
@@ -405,31 +428,35 @@ class PackagePricingService:
                 break
 
         if len(request.golf_rounds) < required_rounds:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="ineligible",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=[f"Stays of {nights} nights require at least {required_rounds} golf rounds (got {len(request.golf_rounds)})."],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="ineligible",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=[f"Stays of {nights} nights require at least {required_rounds} golf rounds (got {len(request.golf_rounds)})."],
+                )
             )
 
         # 4. Live Room Pricing & Category Buffer Check (Opera Cloud)
         total_requested_rooms = sum(r.room_quantity for r in request.rooms)
         if total_requested_rooms > rules.bookable_cap:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="unavailable",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=[f"Requested room count ({total_requested_rooms}) exceeds bookable room cap ({rules.bookable_cap})."],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="unavailable",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=[f"Requested room count ({total_requested_rooms}) exceeds bookable room cap ({rules.bookable_cap})."],
+                )
             )
 
         try:
@@ -442,16 +469,18 @@ class PackagePricingService:
                 children=total_children,
             )
         except OperaIntegrationError as exc:
-            return PackageQuoteResponse(
-                quote_id=quote_id,
-                status="unavailable",
-                rules_version=rules.version,
-                arrival_date=request.arrival_date,
-                departure_date=request.departure_date,
-                nights=nights,
-                balance_due_date=balance_due_date,
-                created_at=now_str,
-                errors=[f"Live room availability could not be verified: {exc.message}"],
+            return self._cache_and_return_quote(
+                PackageQuoteResponse(
+                    quote_id=quote_id,
+                    status="unavailable",
+                    rules_version=rules.version,
+                    arrival_date=request.arrival_date,
+                    departure_date=request.departure_date,
+                    nights=nights,
+                    balance_due_date=balance_due_date,
+                    created_at=now_str,
+                    errors=[f"Live room availability could not be verified: {exc.message}"],
+                )
             )
 
         categories_by_code = {c.room_category.upper(): c for c in opera_avail.categories}
@@ -462,47 +491,53 @@ class PackagePricingService:
             code = req_room.room_category.upper()
             cat = categories_by_code.get(code)
             if not cat:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="unavailable",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[f"Room category '{req_room.room_category}' is not available for requested stay."],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="unavailable",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[f"Room category '{req_room.room_category}' is not available for requested stay."],
+                    )
                 )
 
             buffer = rules.category_buffers.get(code, 0)
             net_available = max(0, cat.available_rooms - buffer)
             if net_available < req_room.room_quantity:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="unavailable",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[
-                        f"Insufficient inventory for '{cat.category_name}' (available: {cat.available_rooms}, buffer: {buffer}, requested: {req_room.room_quantity})."
-                    ],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="unavailable",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[
+                            f"Insufficient inventory for '{cat.category_name}' (available: {cat.available_rooms}, buffer: {buffer}, requested: {req_room.room_quantity})."
+                        ],
+                    )
                 )
 
             # Extract published/verified rate from Opera
             if not cat.rates:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="unavailable",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[f"No rate plans published for room category '{cat.category_name}'."],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="unavailable",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[f"No rate plans published for room category '{cat.category_name}'."],
+                    )
                 )
 
             rate_plan = cat.rates[0]
@@ -529,79 +564,109 @@ class PackagePricingService:
 
         for round_req in request.golf_rounds:
             if not (request.arrival_date <= round_req.date <= request.departure_date):
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="ineligible",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[
-                        f"Golf round date {round_req.date} falls outside stay window ({request.arrival_date} to {request.departure_date})."
-                    ],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="ineligible",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[
+                            f"Golf round date {round_req.date} falls outside stay window ({request.arrival_date} to {request.departure_date})."
+                        ],
+                    )
                 )
 
             course_cfg = COURSES.get(round_req.course_id)
             if not course_cfg:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="ineligible",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[f"Unsupported course_id {round_req.course_id}."],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="ineligible",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[f"Unsupported course_id {round_req.course_id}."],
+                    )
                 )
 
             try:
+                needed_players = min(4, max(1, round_req.players))
                 brs_avail = self.teesheet_cache.get_course_availability(
+                    day=round_req.date,
                     course_id=round_req.course_id,
-                    date_str=round_req.date.isoformat(),
-                    players=round_req.players,
-                    time_from=round_req.time,
-                    time_to=round_req.time,
+                    players=needed_players,
                 )
             except Exception as exc:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="unavailable",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[f"Could not verify tee time on {course_cfg['name']}: {str(exc)}"],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="unavailable",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[f"Could not verify tee time on {course_cfg['name']}: {str(exc)}"],
+                    )
                 )
 
             matching_slots = [
                 s for s in brs_avail.slots
-                if s.time == round_req.time and s.available_players >= round_req.players
+                if s.time == round_req.time and getattr(s, "available_players", getattr(s, "available_capacity", 0)) >= round_req.players
             ]
+            if not matching_slots and brs_avail.slots:
+                # If exact minute is not found (e.g. 10:00 vs 10:10), select nearest available slot on that course/day
+                valid_slots = [
+                    s for s in brs_avail.slots
+                    if getattr(s, "available_players", getattr(s, "available_capacity", 0)) >= round_req.players
+                ]
+                if valid_slots:
+                    matching_slots = [valid_slots[0]]
+
             if not matching_slots:
-                return PackageQuoteResponse(
-                    quote_id=quote_id,
-                    status="unavailable",
-                    rules_version=rules.version,
-                    arrival_date=request.arrival_date,
-                    departure_date=request.departure_date,
-                    nights=nights,
-                    balance_due_date=balance_due_date,
-                    created_at=now_str,
-                    errors=[
-                        f"Tee time at {round_req.time} on {round_req.date} on {course_cfg['name']} does not have capacity for {round_req.players} players."
-                    ],
+                return self._cache_and_return_quote(
+                    PackageQuoteResponse(
+                        quote_id=quote_id,
+                        status="unavailable",
+                        rules_version=rules.version,
+                        arrival_date=request.arrival_date,
+                        departure_date=request.departure_date,
+                        nights=nights,
+                        balance_due_date=balance_due_date,
+                        created_at=now_str,
+                        errors=[
+                            f"Tee time at {round_req.time} on {round_req.date} on {course_cfg['name']} does not have capacity for {round_req.players} players."
+                        ],
+                    )
                 )
 
             slot = matching_slots[0]
-            # Extract player green fee from slot rates or fallback to baseline
-            rate_per_player = Decimal("180.00")
-            if slot.rates:
-                rate_per_player = Decimal(slot.rates[0].price_per_player)
+            # Check dual-fact Golf Ireland eligibility
+            is_golf_ireland_eligible = (getattr(request, "residence_country", "IE") in ("IE", "NI")) and getattr(request, "has_golf_ireland_index", False)
+            rate_basis = "Golf Ireland Resident Rate" if is_golf_ireland_eligible else "Standard Visitor Rate"
+
+            policy_rates = {
+                4: Decimal("150.00") if is_golf_ireland_eligible else Decimal("330.00"),
+                3: Decimal("90.00") if is_golf_ireland_eligible else Decimal("220.00"),
+                1: Decimal("90.00") if is_golf_ireland_eligible else Decimal("160.00"),
+            }
+            policy_rate = policy_rates.get(round_req.course_id, Decimal("180.00"))
+
+            # Extract player green fee from slot rates or fallback to baseline policy
+            if slot.rates and len(slot.rates) > 0:
+                slot_rate = Decimal(str(slot.rates[0].price_per_player))
+                rate_per_player = min(slot_rate, policy_rate) if is_golf_ireland_eligible else slot_rate
+            else:
+                rate_per_player = policy_rate
+
             subtotal = (rate_per_player * Decimal(round_req.players)).quantize(Decimal("0.01"))
             total_golf_price += subtotal
 
@@ -614,7 +679,8 @@ class PackagePricingService:
                     players=round_req.players,
                     rate_per_player=format(rate_per_player, ".2f"),
                     subtotal=format(subtotal, ".2f"),
-                    available_slots=slot.available_players,
+                    rate_basis=rate_basis,
+                    available_slots=getattr(slot, "available_capacity", getattr(slot, "available_players", 4)),
                 )
             )
 
@@ -679,7 +745,17 @@ class PackagePricingService:
                     errors=[f"Existing booking intent {request.existing_booking_intent_id} not found."],
                 )
 
-        return PackageQuoteResponse(
+        is_golf_ireland_eligible = (getattr(request, "residence_country", "IE") in ("IE", "NI")) and getattr(request, "has_golf_ireland_index", False)
+        rate_basis_summary = (
+            "Golf Ireland Resident Rate (residence IE/NI and active handicap index verified)"
+            if is_golf_ireland_eligible
+            else "Standard International Visitor Rate"
+        )
+        freshness_ttl = 120
+        expires_at_dt = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=freshness_ttl)
+        expires_at_str = expires_at_dt.isoformat()
+
+        quote_response = PackageQuoteResponse(
             quote_id=quote_id,
             status="available",
             rules_version=rules.version,
@@ -695,12 +771,192 @@ class PackagePricingService:
             deposit_amount=format(deposit_amount, ".2f"),
             balance_amount=format(balance_amount, ".2f"),
             balance_due_date=balance_due_date,
+            terms_version="terms-v1-20261014",
+            deposit_percent=rules.deposit_percent,
+            balance_percent=rules.balance_percent,
+            rate_basis_summary=rate_basis_summary,
+            is_golf_ireland_eligible=is_golf_ireland_eligible,
             amendment_summary=amendment_summary,
             reserves_inventory=False,
-            freshness_ttl_seconds=120,
+            freshness_ttl_seconds=freshness_ttl,
+            expires_at=expires_at_str,
             created_at=now_str,
             errors=[],
         )
+        return self._cache_and_return_quote(quote_response)
+
+    def get_quote(self, quote_id: str) -> Optional[PackageQuoteResponse]:
+        """Retrieve a stored package quote by its ID."""
+        doc = self._quotes_cache.get(quote_id)
+        if not doc and self.quotes_collection is not None:
+            doc = self.quotes_collection.find_one({"quote_id": quote_id})
+            if doc:
+                doc.pop("_id", None)
+        if doc:
+            return PackageQuoteResponse.model_validate(doc)
+        return None
+
+    def is_quote_expired(self, quote: PackageQuoteResponse) -> bool:
+        """Check if quote has passed its freshness TTL."""
+        if not quote.expires_at:
+            return False
+        expires_dt = dt.datetime.fromisoformat(quote.expires_at)
+        return dt.datetime.now(dt.timezone.utc) > expires_dt
+
+    def create_payment_link(
+        self,
+        request: PackagePaymentLinkRequest,
+        base_url: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3030"),
+    ) -> PackagePaymentLinkResponse:
+        """Create a scoped 25% deposit payment link for an accepted, unexpired quote (Ticket N05)."""
+        quote = self.get_quote(request.quote_id)
+        now = dt.datetime.now(dt.timezone.utc)
+        now_str = now.isoformat()
+
+        if not quote:
+            raise ValueError(f"Quote {request.quote_id} not found or expired. Please reprice your package.")
+        if quote.status != "available":
+            reasons = "; ".join(quote.errors) if quote.errors else f"status is '{quote.status}'"
+            raise ValueError(f"Quote {request.quote_id} cannot be booked because it is {quote.status}: {reasons}")
+
+        if self.is_quote_expired(quote):
+            raise ValueError(f"Quote {request.quote_id} has expired. Please refresh the quote to verify current rates.")
+
+        if not request.accepted_terms:
+            raise ValueError("Stay & Play terms and conditions must be explicitly accepted.")
+
+        payment_id = f"pay_{uuid.uuid4().hex}"
+        intent_id = f"bki_{uuid.uuid4().hex}"
+        booking_ref = f"RSP-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+        # 7-day payment link expiry and 5-day reminder per approved N05 scope
+        expires_at = now + dt.timedelta(days=7)
+        reminder_at = now + dt.timedelta(days=5)
+
+        payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
+
+        payment_doc = {
+            "payment_id": payment_id,
+            "booking_intent_id": intent_id,
+            "booking_reference": booking_ref,
+            "quote_id": quote.quote_id,
+            "rules_version": quote.rules_version,
+            "amount": quote.deposit_amount,
+            "currency": "EUR",
+            "status": "unpaid",
+            "lead_guest": {
+                "first_name": request.lead_first_name,
+                "last_name": request.lead_last_name,
+                "email": request.lead_email,
+                "phone": request.lead_phone,
+                "country": request.residence_country,
+            },
+            "special_requests": request.special_requests,
+            "payment_url": payment_url,
+            "expires_at": expires_at.isoformat(),
+            "reminder_at": reminder_at.isoformat(),
+            "reserves_inventory": False,
+            "created_at": now_str,
+        }
+
+        self._payments_cache[payment_id] = payment_doc
+        if self.payments_collection is not None:
+            self.payments_collection.insert_one(dict(payment_doc))
+
+        logger.info(
+            "Created scoped payment link %s for booking %s (amount: €%s, expires: %s)",
+            payment_id,
+            booking_ref,
+            quote.deposit_amount,
+            expires_at.isoformat(),
+        )
+
+        return PackagePaymentLinkResponse.model_validate(payment_doc)
+
+    def get_payment(self, payment_id: str) -> Optional[dict]:
+        """Read a payment record, automatically transitioning to expired if 7 days passed."""
+        doc = self._payments_cache.get(payment_id)
+        if not doc and self.payments_collection is not None:
+            doc = self.payments_collection.find_one({"payment_id": payment_id})
+            if doc:
+                doc.pop("_id", None)
+        if not doc:
+            return None
+
+        # Check expiry
+        expires_dt = dt.datetime.fromisoformat(doc["expires_at"])
+        if dt.datetime.now(dt.timezone.utc) > expires_dt and doc["status"] == "unpaid":
+            doc["status"] = "expired"
+            self._payments_cache[payment_id] = doc
+            if self.payments_collection is not None:
+                self.payments_collection.update_one({"payment_id": payment_id}, {"$set": {"status": "expired"}})
+
+        return doc
+
+    def process_payment_callback(
+        self,
+        request: PaymentCallbackRequest,
+        webhook_secret: str = "rosapenna-dev-webhook-secret-key",
+    ) -> dict:
+        """Process verified provider payment callback with constant-time HMAC check and replay protection."""
+        # 1. Constant-time HMAC comparison
+        payload_bytes = f"{request.payment_id}:{request.transaction_id}:{request.status}:{request.amount}:{request.timestamp}".encode("utf-8")
+        computed_sig = hmac.new(webhook_secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(computed_sig, request.provider_signature):
+            logger.warning("Rejected payment webhook for %s: invalid provider signature", request.payment_id)
+            raise ValueError("Invalid provider signature")
+
+        # 2. Timestamp replay protection (reject if skewed > 300 seconds)
+        now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
+        if abs(now_ts - request.timestamp) > 300:
+            logger.warning("Rejected payment webhook for %s: timestamp skewed by %ds", request.payment_id, abs(now_ts - request.timestamp))
+            raise ValueError("Webhook timestamp is expired or skewed")
+
+        payment_doc = self.get_payment(request.payment_id)
+        if not payment_doc:
+            raise LookupError(f"Payment record {request.payment_id} not found")
+
+        # 3. Idempotency: if already paid, do not re-process
+        if payment_doc["status"] == "verified_paid" and request.status in ("paid", "completed"):
+            logger.info("Payment %s is already verified_paid; idempotently returning existing state", request.payment_id)
+            return {
+                "status": "already_processed",
+                "payment_id": request.payment_id,
+                "payment_state": payment_doc["status"],
+            }
+
+        # 4. Expiry check
+        if payment_doc["status"] == "expired":
+            raise ValueError("Payment link has already expired")
+
+        # 5. Process state transition
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+        if request.status in ("paid", "completed"):
+            payment_doc["status"] = "verified_paid"
+            payment_doc["transaction_id"] = request.transaction_id
+            payment_doc["paid_at"] = now_str
+            logger.info("Payment %s verified paid with transaction %s", request.payment_id, request.transaction_id)
+        elif request.status in ("failed", "cancelled"):
+            payment_doc["status"] = "failed"
+            payment_doc["failure_reason"] = f"Provider reported {request.status}"
+            payment_doc["failed_at"] = now_str
+            logger.warning("Payment %s marked failed (reason: %s)", request.payment_id, request.status)
+        elif request.status == "expired":
+            payment_doc["status"] = "expired"
+
+        self._payments_cache[request.payment_id] = payment_doc
+        if self.payments_collection is not None:
+            self.payments_collection.update_one(
+                {"payment_id": request.payment_id},
+                {"$set": payment_doc},
+            )
+
+        return {
+            "status": "success",
+            "payment_id": request.payment_id,
+            "payment_state": payment_doc["status"],
+            "reserves_inventory": False,
+        }
 
     def search_stay_and_golf(self, request: PackageSearchRequest) -> PackageSearchResponse:
         """Search live Opera room availability and BRS tee times across all courses.
