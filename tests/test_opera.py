@@ -417,6 +417,23 @@ class OperaRouteHandlerTests(unittest.TestCase):
         linked_opera = updated_intent["links"]["opera_reservation"]
         self.assertEqual(linked_opera["room_category"], "PENTHOUSE")
 
+    def test_search_reservation_by_confirmation_number(self):
+        """Lookup by confirmation number retrieves reservation details."""
+        res = self.client.search_reservation_by_confirmation_number("CONF-12345")
+        self.assertEqual(res.confirmation_number, "CONF-12345")
+        self.assertEqual(res.room_category, "DELUXE")
+        self.assertIsNotNone(res.arrival_date)
+
+    def test_get_reservation_by_identifier_resolution(self):
+        """get_reservation_by_identifier resolves both reservation ID and confirmation number."""
+        # By ID
+        res_by_id = self.client.get_reservation_by_identifier("opera-sample-123")
+        self.assertIn("opera-sample-123", res_by_id.reservation_id.lower())
+
+        # By confirmation
+        res_by_conf = self.client.get_reservation_by_identifier("CONF-TEST999")
+        self.assertEqual(res_by_conf.confirmation_number, "CONF-TEST999")
+
 
 if __name__ == "__main__":
     unittest.main()

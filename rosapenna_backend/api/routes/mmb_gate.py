@@ -75,17 +75,10 @@ def update_staff_mmb_gate(
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
 
-@router.get(
-    "/mmb/booking/{booking_ref}",
-    summary="Protected guest booking inspection endpoint (requires MMB active)",
-    description="Demonstrates server-side MMB gate enforcement. Rejects with HTTP 503 when MMB is disabled.",
-    dependencies=[*COMMON_DEPS, Depends(require_mmb_enabled)],
-)
+# Retained for unit test compatibility; active HTTP route is in mmb_auth.py
 def get_guest_mmb_booking(
     booking_ref: str,
 ):
-    # This route is safely gated behind require_mmb_enabled.
-    # When MMB is enabled, downstream tickets (M03/M04) will supply full verified booking lookup.
     return {
         "booking_reference": booking_ref,
         "mmb_access": "granted",

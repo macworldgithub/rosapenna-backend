@@ -301,6 +301,68 @@ class OperaClient:
             logger.error("Opera reservation lookup connection failed (%s)", type(exc).__name__)
             raise OperaUnavailableError("Could not connect to Opera Cloud reservation endpoint.") from exc
 
+    def search_reservation_by_confirmation_number(self, confirmation_number: str) -> RoomReservationDetail:
+        """Lookup an existing reservation by Opera confirmation number via OHIP search endpoint."""
+        clean_num = confirmation_number.strip()
+        if not clean_num:
+            raise OperaIntegrationError("A valid confirmation_number is required.", status_code=400, detail_code="invalid_id")
+
+        for res in self._sandbox_reservations.values():
+            if res.confirmation_number == clean_num:
+                return res
+
+        if not self.is_configured:
+            if self.settings.enable_mock_fallback:
+                return self._generate_fixture_reservation_by_conf(clean_num)
+            raise OperaUnavailableError("Oracle Opera Cloud integration is not configured.")
+
+        token = self._get_oauth_token()
+        gateway = self.settings.effective_gateway
+        hotel_id = self.settings.hotel_id.strip()
+        app_key = self.settings.app_key.get_secret_value().strip()
+
+        params = urllib.parse.urlencode({"confirmationNumber": clean_num})
+        url = f"{gateway}/rsv/v1/hotels/{hotel_id}/reservations?{params}"
+
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-app-key": app_key,
+            "x-hotelid": hotel_id,
+            "Accept": "application/json",
+        }
+        if self.settings.enterprise_id:
+            headers["enterpriseId"] = self.settings.enterprise_id
+
+        req = urllib.request.Request(url, headers=headers, method="GET")
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.settings.timeout_seconds) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+                return self._parse_reservation_detail(payload, clean_num)
+        except urllib.error.HTTPError as exc:
+            logger.error("Opera reservation search failed with HTTP %d", exc.code)
+            if exc.code == 401:
+                self._cached_token = None
+                raise OperaAuthError() from exc
+            if exc.code == 403:
+                raise OperaPermissionError() from exc
+            if exc.code == 404:
+                raise OperaNotFoundError(f"Reservation with confirmation number '{clean_num}' was not found.") from exc
+            if exc.code == 429:
+                raise OperaRateLimitError() from exc
+            raise OperaUnavailableError(f"Opera Cloud reservation search returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            logger.error("Opera reservation search connection failed (%s)", type(exc).__name__)
+            raise OperaUnavailableError("Could not connect to Opera Cloud reservation search endpoint.") from exc
+
+    def get_reservation_by_identifier(self, identifier: str) -> RoomReservationDetail:
+        """Lookup reservation by reservation ID or confirmation number."""
+        clean_id = identifier.strip()
+        try:
+            return self.get_reservation(clean_id)
+        except OperaNotFoundError:
+            return self.search_reservation_by_confirmation_number(clean_id)
+
     def _parse_availability_response(
         self,
         payload: Dict[str, Any],
@@ -354,10 +416,19 @@ class OperaClient:
         res_data = payload.get("reservation", payload)
         if isinstance(payload.get("reservations", {}).get("reservation"), list) and payload["reservations"]["reservation"]:
             res_data = payload["reservations"]["reservation"][0]
+        elif isinstance(payload.get("reservations", {}).get("reservationInfo"), list) and payload["reservations"]["reservationInfo"]:
+            res_data = payload["reservations"]["reservationInfo"][0]
 
         hotel_id = res_data.get("hotelId", self.settings.hotel_id)
         status = res_data.get("reservationStatus", "Confirmed")
         conf_num = res_data.get("confirmationNumber", reservation_id)
+
+        for id_item in res_data.get("reservationIdList", []):
+            if isinstance(id_item, dict):
+                if id_item.get("type") == "Confirmation":
+                    conf_num = id_item.get("id", conf_num)
+                elif id_item.get("type") == "Reservation" and not reservation_id:
+                    reservation_id = id_item.get("id", reservation_id)
 
         stay_info = res_data.get("roomStay", {})
         arrival = dt.date.fromisoformat(stay_info.get("arrivalDate", dt.date.today().isoformat()))
@@ -470,15 +541,39 @@ class OperaClient:
 
     def _generate_fixture_reservation(self, reservation_id: str) -> RoomReservationDetail:
         """Deterministic fixture reservation for lookup demonstration."""
+        clean_id = reservation_id.strip()
+        conf_num = clean_id if clean_id.upper().startswith("CONF-") else f"CONF-{clean_id.upper()}"
         return RoomReservationDetail(
-            reservation_id=reservation_id,
-            confirmation_number=f"CONF-{reservation_id.upper()}",
+            reservation_id=clean_id,
+            confirmation_number=conf_num,
             hotel_id=self.settings.hotel_id,
             status="Confirmed",
             arrival_date=dt.date(2027, 5, 14),
             departure_date=dt.date(2027, 5, 17),
             room_category="DELUXE",
             room_number=None,  # Hotel physical room allocated 2 days prior to arrival
+            occupants=[
+                RoomOccupant(first_name="Sample", last_name="Golfer", is_primary=True),
+                RoomOccupant(first_name="Guest", last_name="Golfer", is_primary=False),
+            ],
+            total_amount=990.0,
+            currency="EUR",
+            source="fixture_fallback",
+        )
+
+    def _generate_fixture_reservation_by_conf(self, conf_num: str) -> RoomReservationDetail:
+        """Deterministic fixture reservation lookup by confirmation number."""
+        clean = conf_num.strip()
+        res_id = clean.replace("CONF-", "").lower()
+        return RoomReservationDetail(
+            reservation_id=f"res_{res_id}",
+            confirmation_number=clean,
+            hotel_id=self.settings.hotel_id,
+            status="Confirmed",
+            arrival_date=dt.date(2027, 5, 14),
+            departure_date=dt.date(2027, 5, 17),
+            room_category="DELUXE",
+            room_number=None,
             occupants=[
                 RoomOccupant(first_name="Sample", last_name="Golfer", is_primary=True),
                 RoomOccupant(first_name="Guest", last_name="Golfer", is_primary=False),

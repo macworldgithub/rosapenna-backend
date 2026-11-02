@@ -1,13 +1,20 @@
 """FastAPI dependencies for runtime-owned services."""
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient
 from rosapenna_backend.integrations.opera.client import OperaClient
 from rosapenna_backend.services.booking_intents import BookingIntentStore
+from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
+from rosapenna_backend.services.mmb_auth import (
+    ForbiddenBookingScopeError,
+    InvalidSessionError,
+    MmbAuthService,
+)
+from rosapenna_backend.api.schemas.mmb_auth import GuestSessionPrincipal
 from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.package_pricing import PackagePricingService
 from rosapenna_backend.services.staff_audit import StaffAuditLog
@@ -94,6 +101,16 @@ def get_mmb_gate_service(request: Request) -> MmbGateService:
     return service
 
 
+def get_booking_linkage_service(request: Request) -> BookingLinkageService:
+    service = getattr(request.app.state, "booking_linkage_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        opera_client = get_opera_client(request)
+        service = BookingLinkageService(database=db, opera_client=opera_client)
+        request.app.state.booking_linkage_service = service
+    return service
+
+
 def require_mmb_enabled(
     request: Request,
 ) -> None:
@@ -105,5 +122,61 @@ def require_mmb_enabled(
             detail="Manage My Booking is currently unavailable.",
             headers={"Retry-After": "300"},
         )
+
+
+def get_mmb_auth_service(request: Request) -> MmbAuthService:
+    service = getattr(request.app.state, "mmb_auth_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        email_svc = get_email_delivery_service(request)
+        service = MmbAuthService(database=db, email_service=email_svc)
+        request.app.state.mmb_auth_service = service
+    return service
+
+
+def get_current_guest_session(
+    request: Request,
+    auth_service: MmbAuthService = Depends(get_mmb_auth_service),
+) -> GuestSessionPrincipal:
+    """Enforce active guest session, checking MMB release gate and session validity."""
+    # 1. Gate check: disabling MMB immediately invalidates access
+    require_mmb_enabled(request)
+
+    # 2. Extract token from header: X-MMB-Session or Authorization: Bearer <token>
+    token = request.headers.get("X-MMB-Session")
+    if not token:
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
+
+    if not token:
+        raise HTTPException(
+            status_code=401,
+            detail="Guest session token is missing. Please sign in via verification code.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    try:
+        return auth_service.validate_session(token)
+    except InvalidSessionError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail=exc.message,
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+
+def require_guest_booking_scope(
+    booking_reference: str,
+    session: GuestSessionPrincipal = Depends(get_current_guest_session),
+) -> GuestSessionPrincipal:
+    """IDOR Prevention: enforce that the session is strictly authorized for the requested booking."""
+    if session.booking_reference != booking_reference.strip().upper():
+        raise HTTPException(
+            status_code=403,
+            detail="Access denied. Session is not authorized for this booking.",
+        )
+    return session
+
 
 
