@@ -258,6 +258,9 @@ class OperaClient:
         if clean_id in self._sandbox_reservations:
             return self._sandbox_reservations[clean_id]
 
+        if not self.settings.allow_live_writes and self.settings.enable_mock_fallback:
+            return self._generate_fixture_reservation(clean_id)
+
         if not self.is_configured:
             if self.settings.enable_mock_fallback:
                 return self._generate_fixture_reservation(clean_id)

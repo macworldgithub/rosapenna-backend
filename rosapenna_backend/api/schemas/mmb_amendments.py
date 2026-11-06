@@ -171,7 +171,7 @@ class AmendmentOfferSnapshot(BaseModel):
     occupant_review_acknowledged: bool = False
     occupant_review_version: Optional[str] = None
     terms_version: str = "terms-v1-20261014"
-    status: Literal["pending_consent", "accepted", "expired", "invalidated"] = "pending_consent"
+    status: Literal["pending_consent", "accepted", "expired", "invalidated", "committed"] = "pending_consent"
     expires_at: dt.datetime
     created_at: dt.datetime
     accepted_at: Optional[dt.datetime] = None
@@ -284,3 +284,38 @@ class AmendmentPaymentInitiateResponse(BaseModel):
     reserves_inventory: bool = False  # Strictly False per AC 6
     idempotency_key: Optional[str] = None
     created_at: dt.datetime
+
+
+class MmbAmendmentCommitRequest(BaseModel):
+    """Guest request to safely commit an accepted, revalidated, and settled amendment offer (Ticket M09)."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    booking_reference: str = Field(
+        min_length=5,
+        max_length=40,
+        pattern=r"^[A-Za-z0-9\-]+$",
+        description="Canonical booking reference.",
+    )
+    offer_id: str = Field(min_length=5, max_length=100)
+    revalidation_id: str = Field(min_length=5, max_length=100)
+    payment_id: Optional[str] = Field(default=None, max_length=100)
+    idempotency_key: str = Field(min_length=8, max_length=128)
+
+
+class MmbAmendmentCommitResponse(BaseModel):
+    """Authoritative result of confirmed amendment commit (Ticket M09)."""
+    model_config = ConfigDict(extra="ignore", str_strip_whitespace=True)
+
+    operation_id: str
+    booking_reference: str
+    offer_id: str
+    status: Literal["confirmed", "unconfirmed_reconciliation", "pending_payment"]
+    stage: str
+    message: str
+    readback_verified: bool = False
+    staff_review_required: bool = False
+    replayed: bool = False
+    new_booking_revision: Optional[int] = None
+    email_delivery_id: Optional[str] = None
+    committed_at: Optional[str] = None
+

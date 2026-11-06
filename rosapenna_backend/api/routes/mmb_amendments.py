@@ -3,6 +3,7 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 
 from rosapenna_backend.api.dependencies import (
+    get_booking_operation_engine,
     get_current_guest_session,
     get_mmb_amendment_service,
     require_guest_booking_scope,
@@ -16,6 +17,8 @@ from rosapenna_backend.api.schemas.mmb_amendments import (
     AmendmentOfferAcceptRequest,
     AmendmentOfferCreateRequest,
     AmendmentOfferSnapshot,
+    MmbAmendmentCommitRequest,
+    MmbAmendmentCommitResponse,
     MmbAmendmentSearchRequest,
     MmbAmendmentSearchResponse,
 )
@@ -211,3 +214,42 @@ def get_amendment_payment_status(
     if not payment:
         raise HTTPException(status_code=404, detail="Payment record not found.")
     return payment
+
+
+@router.post(
+    "/commit",
+    response_model=MmbAmendmentCommitResponse,
+    summary="Commit confirmed amendment through coordinated vendor writes with readback (Ticket M09)",
+    description=(
+        "Executes Opera stay amendment and replacement BRS round writes. "
+        "Strictly verifies post-write readbacks before releasing original rounds. "
+        "On any failure, executes supported compensation or halts to unconfirmed reconciliation "
+        "alerting staff, leaving original booking intact for the guest."
+    ),
+    dependencies=[Depends(rate_limit), Depends(require_mmb_enabled)],
+)
+def commit_amendment(
+    request: MmbAmendmentCommitRequest,
+    response: Response,
+    session: GuestSessionPrincipal = Depends(get_current_guest_session),
+    amendment_service: MmbAmendmentService = Depends(get_mmb_amendment_service),
+    engine = Depends(get_booking_operation_engine),
+) -> MmbAmendmentCommitResponse:
+    require_guest_booking_scope(request.booking_reference, session)
+    response.headers["Cache-Control"] = "no-store"
+
+    try:
+        return amendment_service.commit_amendment(request, engine=engine)
+    except LinkageNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Booking reference '{request.booking_reference}' was not found.",
+        )
+    except ValueError as exc:
+        msg = str(exc)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=msg)
+        if "revision mismatch" in msg.lower() or "modified" in msg.lower() or "expired" in msg.lower() or "invalidated" in msg.lower():
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=msg)
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=msg)
+

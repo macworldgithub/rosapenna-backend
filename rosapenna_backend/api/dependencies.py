@@ -235,6 +235,8 @@ def get_booking_operation_engine(request: Request):
         opera_client = get_opera_client(request)
         brs_client = get_brs_booking_client(request)
         email_svc = get_email_delivery_service(request)
+        amendment_svc = get_mmb_amendment_service(request)
+        occupants_svc = get_mmb_occupants_service(request)
         engine = BookingOperationEngine(
             database=db,
             pricing_service=pricing_svc,
@@ -242,6 +244,8 @@ def get_booking_operation_engine(request: Request):
             opera_client=opera_client,
             brs_client=brs_client,
             email_service=email_svc,
+            amendment_service=amendment_svc,
+            occupants_service=occupants_svc,
         )
         request.app.state.booking_operation_engine = engine
     return engine

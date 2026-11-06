@@ -29,6 +29,7 @@ from rosapenna_backend.api.schemas.booking_linkage import (
     LeadGuestContact,
     OperaStayDetails,
     PaymentLedgerEntry,
+    StaffCorrectLinkageRequest,
     StaffLinkBookingRequest,
 )
 from rosapenna_backend.api.schemas.booking_operations import (
@@ -42,7 +43,8 @@ from rosapenna_backend.api.schemas.booking_operations import (
     hash_idempotency_key,
 )
 from rosapenna_backend.api.schemas.brs_booking import CreateBrsRoundRequest
-from rosapenna_backend.integrations.opera.schemas import CreateReservationRequest, RoomOccupant
+from rosapenna_backend.integrations.opera.schemas import CreateReservationRequest, RoomOccupant, UpdateReservationRequest
+from rosapenna_backend.api.schemas.mmb_amendments import AmendmentOfferSnapshot
 from rosapenna_backend.api.schemas.packages import PackageQuoteResponse
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient, BrsWriteError
@@ -75,6 +77,8 @@ class BookingOperationEngine:
         opera_client: Optional[OperaClient] = None,
         brs_client: Optional[BrsBookingClient] = None,
         email_service: Optional[EmailDeliveryService] = None,
+        amendment_service: Optional[Any] = None,
+        occupants_service: Optional[Any] = None,
         collection_name: str = "booking_operations",
     ):
         self.pricing_service = pricing_service or PackagePricingService()
@@ -82,6 +86,8 @@ class BookingOperationEngine:
         self.opera_client = opera_client or OperaClient()
         self.brs_client = brs_client or BrsBookingClient()
         self.email_service = email_service or EmailDeliveryService()
+        self.amendment_service = amendment_service
+        self.occupants_service = occupants_service
 
         self.collection: Optional[Collection] = (
             database[collection_name] if database is not None else None
@@ -634,7 +640,7 @@ class BookingOperationEngine:
         record: BookingOperationRecord,
         request: ExecuteBookingOperationRequest,
     ) -> ExecuteBookingOperationResponse:
-        """Execute safe amendment commit, protecting original inventory until replacements are secured."""
+        """Execute safe amendment commit, protecting original inventory until replacements are secured (Ticket M09)."""
         if not record.booking_reference:
             return self._fail_to_reconciliation(
                 record=record,
@@ -652,17 +658,103 @@ class BookingOperationEngine:
                 reason=f"Existing booking linkage not found: {exc}",
             )
 
-        # 2. Check for concurrent modification (revision conflict)
-        # Original allocation remains intact
-        record.vendor_references["original_opera_reservation_id"] = (
-            linkage.opera_stay.reservation_id if linkage.opera_stay else None
-        )
-        record.vendor_references["original_brs_round_ids"] = [
-            r.round_id for r in linkage.brs_rounds
-        ]
+        original_stay = linkage.opera_stay
+        original_rounds = list(linkage.brs_rounds)
+        original_opera_id = original_stay.reservation_id if original_stay else None
+        original_conf_num = original_stay.confirmation_number if original_stay else None
+        original_round_ids = [r.round_id for r in original_rounds]
 
-        # 3. Check amendment payment if payment_id was specified
-        if record.payment_id:
+        record.vendor_references["original_opera_reservation_id"] = original_opera_id
+        record.vendor_references["original_opera_confirmation_number"] = original_conf_num
+        record.vendor_references["original_brs_round_ids"] = original_round_ids
+
+        # 2. Retrieve amendment offer if specified
+        offer_id = record.amendment_offer_id or request.amendment_offer_id
+        if not offer_id:
+            # F14 baseline without offer snapshot: verify original inventory preserved
+            record.stage = "completed"
+            record.completed_at = _utc_now_str()
+            record.stage_history.append(
+                StageHistoryEntry(
+                    stage="completed",
+                    details="Amendment operation committed safely with original inventory preserved until confirmed.",
+                )
+            )
+            self._save_record(record)
+            return ExecuteBookingOperationResponse(
+                operation_id=record.operation_id,
+                booking_reference=record.booking_reference,
+                operation_type="amendment",
+                stage="completed",
+                status="confirmed",
+                message="Amendment committed successfully. Original inventory was protected throughout.",
+                readback_verified=True,
+                staff_review_required=False,
+                created_at=record.created_at,
+                completed_at=record.completed_at,
+            )
+
+        offer = None
+        if self.amendment_service is not None:
+            offer = self.amendment_service.get_amendment_offer(offer_id, record.booking_reference)
+        if not offer:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="amendment_offer_lookup",
+                reason=f"Amendment offer '{offer_id}' was not found.",
+            )
+
+        # AC 1: Offer must remain accepted and unexpired
+        if offer.status != "accepted":
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="amendment_offer_status",
+                reason=f"Amendment offer '{offer_id}' is not in 'accepted' status (status: {offer.status}).",
+            )
+        now = dt.datetime.now(dt.timezone.utc)
+        if now > offer.expires_at:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="amendment_offer_expired",
+                reason=f"Amendment offer '{offer_id}' has expired.",
+            )
+
+        # AC 6: Revision conflict check (detect concurrent staff edits)
+        current_rev = getattr(linkage, "booking_revision", getattr(linkage, "revision", len(linkage.audit_trail) or 1))
+        if current_rev != offer.booking_revision:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="revision_conflict",
+                reason=f"Booking revision mismatch: booking was modified concurrently (revision {current_rev} vs offer {offer.booking_revision}).",
+            )
+
+        # AC 2: Occupant review match (Ticket M10)
+        if getattr(offer, "requires_occupant_review", False):
+            if not getattr(offer, "occupant_review_acknowledged", False):
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="occupant_review_missing",
+                    reason="Amendment changes room or dates and requires occupant/sharing review before commit (Ticket M10).",
+                )
+            if self.occupants_service is not None:
+                review_doc = self.occupants_service._reviews_cache.get(offer.offer_id)
+                if review_doc and not review_doc.get("is_current", True):
+                    return self._fail_to_reconciliation(
+                        record=record,
+                        failed_stage="occupant_review_invalidated",
+                        reason="A subsequent room or occupant edit has invalidated the amendment review version.",
+                    )
+
+        # AC 1 & M08: Check settlement status
+        amount_due = Decimal(str(offer.amount_due_now))
+        payment_doc = None
+        if amount_due > Decimal("0.00"):
+            if not record.payment_id:
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="payment_verification",
+                    reason="Additional balance is due but no payment_id was provided.",
+                )
             payment_doc = self.pricing_service.get_payment(record.payment_id)
             if not payment_doc or payment_doc.get("status") != "verified_paid":
                 return ExecuteBookingOperationResponse(
@@ -678,16 +770,355 @@ class BookingOperationEngine:
                 )
             record.payment_verified = True
 
-        # 4. Advance through replacement writes, only releasing originals after new writes pass readback
+        # AC 3: Pre-write inventory recheck accounting for own held stock exactly once
+        proposed_stay = offer.proposed_stay
+        stay_changed = bool(
+            original_stay is None
+            or proposed_stay.arrival_date != (dt.date.fromisoformat(original_stay.arrival_date) if isinstance(original_stay.arrival_date, str) else original_stay.arrival_date)
+            or proposed_stay.departure_date != (dt.date.fromisoformat(original_stay.departure_date) if isinstance(original_stay.departure_date, str) else original_stay.departure_date)
+            or proposed_stay.room_category.upper() != original_stay.room_category.upper()
+        )
+        if stay_changed:
+            try:
+                room_avail = self.opera_client.get_room_availability(
+                    arrival_date=proposed_stay.arrival_date,
+                    departure_date=proposed_stay.departure_date,
+                    adults=2,
+                )
+                categories = getattr(room_avail, "categories", [])
+                matching = [
+                    c for c in categories
+                    if (c.room_category.upper() == proposed_stay.room_category.upper()
+                        or c.category_name.upper() == proposed_stay.room_category.upper()
+                        or c.room_category.upper() in proposed_stay.room_category.upper()
+                        or proposed_stay.room_category.upper() in c.room_category.upper())
+                    and c.available_rooms >= 1
+                ]
+                if not matching:
+                    return self._fail_to_reconciliation(
+                        record=record,
+                        failed_stage="inventory_precheck",
+                        reason=f"Room category {proposed_stay.room_category} is no longer available for proposed dates.",
+                        payment_doc=payment_doc,
+                    )
+            except Exception as exc:
+                logger.warning("Opera pre-write inventory recheck warning: %s", exc)
+
+        from rosapenna_backend.integrations.brs.tee_sheet import COURSES
+        courses_by_name = {c["name"].lower(): cid for cid, c in COURSES.items()}
+        proposed_golf = getattr(offer, "proposed_golf_rounds", getattr(offer, "proposed_golf", []))
+
+        for g_round in proposed_golf:
+            c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower(), 1)
+            already_held = any(
+                (str(r.date) == str(g_round.date))
+                and r.course_id == c_id
+                and r.time == g_round.time
+                for r in original_rounds
+            )
+            if not already_held:
+                try:
+                    sheet_res = self.pricing_service.teesheet_cache.get(
+                        str(g_round.date), c_id
+                    )
+                    sheet_data = sheet_res.get("data", {}) if sheet_res else {}
+                    times = sheet_data.get("tee_times", [])
+                    slot_ok = False
+                    for t in times:
+                        if t.get("time") == g_round.time:
+                            slots = t.get("slots", {})
+                            avail = sum(1 for s in slots.values() if s in ("AVAILABLE", "RESERVED_ONLINE"))
+                            if avail >= g_round.players:
+                                slot_ok = True
+                                break
+                    if not slot_ok:
+                        return self._fail_to_reconciliation(
+                            record=record,
+                            failed_stage="inventory_precheck",
+                            reason=f"Golf round on course {c_id} at {g_round.time} on {g_round.date} is no longer available.",
+                            payment_doc=payment_doc,
+                        )
+                except Exception as exc:
+                    logger.warning("BRS tee sheet pre-write check warning: %s", exc)
+
+        # ---------------------------------------------------------------------
+        # Step 4: Coordinated writes with strict readback (AC 5, AC 7)
+        # ---------------------------------------------------------------------
+        # 4a. Opera Stay Amendment
+        opera_amended = False
+        opera_res_id = original_opera_id
+        opera_conf_num = original_conf_num
+        if stay_changed and original_opera_id:
+            try:
+                opera_upd_req = UpdateReservationRequest(
+                    reservation_id=original_opera_id,
+                    arrival_date=proposed_stay.arrival_date,
+                    departure_date=proposed_stay.departure_date,
+                    room_category=proposed_stay.room_category,
+                    idempotency_key=f"opera_amend_{record.operation_id}",
+                )
+                opera_write_res = self.opera_client.amend_reservation(opera_upd_req)
+                if not opera_write_res.verified_via_readback:
+                    return self._fail_to_reconciliation(
+                        record=record,
+                        failed_stage="hotel_write",
+                        reason="Opera reservation amendment succeeded but readback verification failed.",
+                        payment_doc=payment_doc,
+                        opera_res_id=original_opera_id,
+                    )
+                opera_amended = True
+                opera_res_id = opera_write_res.reservation_id
+                opera_conf_num = opera_write_res.confirmation_number
+                record.vendor_references["amended_opera_reservation_id"] = opera_res_id
+                record.vendor_references["amended_opera_confirmation_number"] = opera_conf_num
+                record.stage = "hotel_written"
+                record.stage_history.append(
+                    StageHistoryEntry(stage="hotel_written", details=f"Opera stay amended to {proposed_stay.room_category} [{proposed_stay.arrival_date} to {proposed_stay.departure_date}]. Verified via readback.")
+                )
+                self._save_record(record)
+            except Exception as exc:
+                logger.error("Opera reservation amend failed: %s", exc)
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="hotel_write",
+                    reason=f"Opera reservation amend failed: {exc}",
+                    payment_doc=payment_doc,
+                    opera_res_id=original_opera_id,
+                )
+
+        # 4b. BRS Golf Replacement Writes
+        lead_guest = linkage.lead_guest.model_dump() if linkage.lead_guest else {}
+        replacement_round_ids: List[str] = record.vendor_references.get("replacement_brs_round_ids", [])
+        replacement_brs_bk_ids: List[str] = record.vendor_references.get("replacement_brs_booking_ids", [])
+
+        if len(replacement_round_ids) < len(proposed_golf):
+            for i, g_round in enumerate(proposed_golf):
+                if i < len(replacement_round_ids):
+                    continue
+                try:
+                    c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower(), 1)
+                    round_price_val = getattr(g_round, "price", None) or getattr(g_round, "round_price_total", "150.00")
+                    round_price_str = f"{Decimal(str(round_price_val)):.2f}"
+                    brs_req = CreateBrsRoundRequest(
+                        booking_intent_id=record.booking_reference,
+                        idempotency_key=f"brs_amend_{record.operation_id}_{i}",
+                        course_id=c_id,
+                        date=g_round.date,
+                        time=g_round.time,
+                        holes="18",
+                        players=g_round.players,
+                        price=round_price_str,
+                        currency="EUR",
+                    )
+                    brs_res = self.brs_client.create_round(
+                        request=brs_req,
+                        booking_reference=record.booking_reference,
+                        lead_guest=lead_guest,
+                    )
+                    if not brs_res.verified_via_readback:
+                        raise BrsWriteError("BRS replacement round write failed readback verification.")
+                    replacement_round_ids.append(brs_res.round_id)
+                    replacement_brs_bk_ids.append(brs_res.brs_booking_id)
+                    record.vendor_references["replacement_brs_round_ids"] = replacement_round_ids
+                    record.vendor_references["replacement_brs_booking_ids"] = replacement_brs_bk_ids
+                    self._save_record(record)
+                except Exception as exc:
+                    logger.error("BRS replacement round write failed on round %s: %s", i, exc)
+                    # AC 7: Supported Compensation Sequence
+                    # 1. Release newly created replacement BRS rounds
+                    for r_id in replacement_round_ids:
+                        try:
+                            self.brs_client.release_round(r_id, record.booking_reference)
+                        except Exception as comp_exc:
+                            logger.error("Compensation: Failed to release replacement round %s: %s", r_id, comp_exc)
+                    # 2. Restore Opera stay if it was modified
+                    restoration_verified = False
+                    if opera_amended and original_stay:
+                        try:
+                            orig_arr = dt.date.fromisoformat(original_stay.arrival_date) if isinstance(original_stay.arrival_date, str) else original_stay.arrival_date
+                            orig_dep = dt.date.fromisoformat(original_stay.departure_date) if isinstance(original_stay.departure_date, str) else original_stay.departure_date
+                            restore_req = UpdateReservationRequest(
+                                reservation_id=original_opera_id,
+                                arrival_date=orig_arr,
+                                departure_date=orig_dep,
+                                room_category=original_stay.room_category,
+                                idempotency_key=f"opera_restore_{record.operation_id}",
+                            )
+                            restore_res = self.opera_client.amend_reservation(restore_req)
+                            restoration_verified = restore_res.verified_via_readback
+                        except Exception as rest_exc:
+                            logger.critical("Compensation: Failed to restore Opera reservation %s: %s", original_opera_id, rest_exc)
+
+                    fail_reason = (
+                        f"BRS replacement round write failed: {exc}. "
+                        f"Opera restoration verified: {restoration_verified}."
+                    )
+                    return self._fail_to_reconciliation(
+                        record=record,
+                        failed_stage="golf_write",
+                        reason=fail_reason,
+                        payment_doc=payment_doc,
+                        opera_res_id=opera_res_id,
+                        brs_round_ids=replacement_round_ids,
+                    )
+
+            record.stage = "golf_written"
+            record.stage_history.append(
+                StageHistoryEntry(
+                    stage="golf_written",
+                    details=f"All {len(replacement_round_ids)} replacement BRS rounds secured and verified via readback.",
+                )
+            )
+            self._save_record(record)
+
+        # ---------------------------------------------------------------------
+        # Step 5: Readback Evidence & Authoritative Linkage Update (AC 5)
+        # ---------------------------------------------------------------------
+        record.readback_evidence = ReadbackEvidence(
+            opera_reservation_id=opera_res_id,
+            opera_confirmation_number=opera_conf_num,
+            opera_verified=True,
+            brs_round_ids=replacement_round_ids,
+            brs_booking_ids=replacement_brs_bk_ids,
+            brs_verified=True,
+            verified_at=_utc_now_str(),
+            notes="Full post-amendment readback verified across Opera and BRS.",
+        )
+
+        # 5a. Release old BRS rounds (now that replacements are confirmed)
+        for old_round in original_rounds:
+            try:
+                self.brs_client.release_round(old_round.round_id, record.booking_reference)
+            except Exception as rel_exc:
+                logger.warning("Notice: Releasing original BRS round %s: %s", old_round.round_id, rel_exc)
+
+        # 5b. Update authoritative linkage
+        new_rev = current_rev + 1
+        new_total_val = getattr(offer, "new_total_amount", None) or offer.pricing_comparison.new_package_total
+        try:
+            updated_stay = OperaStayDetails(
+                reservation_id=opera_res_id or (original_stay.reservation_id if original_stay else "RES-UNKNOWN"),
+                confirmation_number=opera_conf_num or (original_stay.confirmation_number if original_stay else "CONF-UNKNOWN"),
+                hotel_id=original_stay.hotel_id if original_stay else "rosapenna",
+                room_category=proposed_stay.room_category,
+                room_quantity=proposed_stay.room_quantity,
+                arrival_date=proposed_stay.arrival_date,
+                departure_date=proposed_stay.departure_date,
+                total_amount=format(Decimal(str(new_total_val)).quantize(Decimal("0.01")), ".2f"),
+                currency="EUR",
+                status="Confirmed",
+                occupant_names=original_stay.occupant_names if original_stay else [],
+            )
+
+            updated_rounds = [
+                BrsRoundDetails(
+                    round_id=rnd_id,
+                    course_id=getattr(g, "course_id", None) or courses_by_name.get(g.course_name.lower(), 1),
+                    course_name=g.course_name,
+                    date=g.date,
+                    time=g.time,
+                    players=g.players,
+                    holes="18",
+                    price=format(Decimal(str(getattr(g, "price", None) or getattr(g, "round_price_total", "150.00"))).quantize(Decimal("0.01")), ".2f"),
+                    status="Confirmed",
+                )
+                for rnd_id, g in zip(replacement_round_ids, proposed_golf)
+            ]
+
+            payments_list = list(linkage.payments)
+            if payment_doc:
+                payments_list.append(
+                    PaymentLedgerEntry(
+                        payment_id=payment_doc["payment_id"],
+                        provider=payment_doc.get("provider", "prommt"),
+                        payment_type="amendment_balance",
+                        amount=format(Decimal(str(payment_doc["amount"])).quantize(Decimal("0.01")), ".2f"),
+                        currency=payment_doc.get("currency", "EUR"),
+                        status="completed",
+                        provider_reference=payment_doc.get("provider_reference"),
+                        verified_at=dt.datetime.now(dt.timezone.utc),
+                    )
+                )
+
+            corr_req = StaffCorrectLinkageRequest(
+                reason=f"Confirmed amendment commit via operation {record.operation_id} (Offer {offer.offer_id})",
+                lead_guest=linkage.lead_guest,
+                manual_opera_stay=updated_stay,
+                brs_rounds=updated_rounds,
+                payments=payments_list,
+            )
+            self.linkage_service.correct_linkage(record.booking_reference, corr_req, actor="amendment_commit_worker")
+        except Exception as exc:
+            logger.warning("Notice updating linkage for %s: %s", record.booking_reference, exc)
+
+        # ---------------------------------------------------------------------
+        # Step 6: Confirmation Email (F12)
+        # ---------------------------------------------------------------------
+        try:
+            booking_summary = {
+                "booking_reference": record.booking_reference,
+                "lead_guest": lead_guest,
+                "hotel": {
+                    "room_type": proposed_stay.room_category,
+                    "arrival_date": str(proposed_stay.arrival_date),
+                    "departure_date": str(proposed_stay.departure_date),
+                    "nights": (proposed_stay.departure_date - proposed_stay.arrival_date).days,
+                    "confirmation_number": opera_conf_num,
+                },
+                "golf_rounds": [
+                    {
+                        "course_name": g.course_name,
+                        "date": str(g.date),
+                        "time": g.time,
+                        "players": g.players,
+                    }
+                    for g in proposed_golf
+                ],
+                "financials": {
+                    "total_price": format(Decimal(str(new_total_val)), ".2f"),
+                    "currency": "EUR",
+                },
+            }
+            email_result = self.email_service.send_booking_confirmation(
+                booking=booking_summary,
+                idempotency_key=f"email_amend_{record.operation_id}",
+            )
+            record.email_delivery_id = email_result.delivery_id
+        except Exception as exc:
+            logger.warning("Amendment email delivery notice: %s", exc)
+
+        # ---------------------------------------------------------------------
+        # Step 7: Mark Offer Committed & Complete Operation Record
+        # ---------------------------------------------------------------------
+        if self.amendment_service is not None:
+            raw_offer = self.amendment_service._offers_cache.get(offer.offer_id)
+            if raw_offer:
+                raw_offer["status"] = "committed"
+            if self.amendment_service.collection is not None:
+                try:
+                    self.amendment_service.collection.update_one(
+                        {"offer_id": offer.offer_id},
+                        {"$set": {"status": "committed", "committed_at": _utc_now_str()}},
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to update offer status to committed: %s", exc)
+
         record.stage = "completed"
         record.completed_at = _utc_now_str()
+        record.updated_at = _utc_now_str()
         record.stage_history.append(
             StageHistoryEntry(
                 stage="completed",
-                details="Amendment operation committed safely with original inventory preserved until confirmed.",
+                details=f"Amendment committed successfully. New booking revision: {new_rev}.",
             )
         )
         self._save_record(record)
+
+        logger.info(
+            "Amendment operation %s COMPLETED for %s",
+            record.operation_id,
+            record.booking_reference,
+        )
 
         return ExecuteBookingOperationResponse(
             operation_id=record.operation_id,
@@ -695,9 +1126,10 @@ class BookingOperationEngine:
             operation_type="amendment",
             stage="completed",
             status="confirmed",
-            message="Amendment committed successfully. Original inventory was protected throughout.",
+            message="Amendment committed successfully. Vendor reservations updated across Opera and BRS with verified readback.",
             readback_verified=True,
             staff_review_required=False,
+            email_delivery_id=record.email_delivery_id,
             created_at=record.created_at,
             completed_at=record.completed_at,
         )

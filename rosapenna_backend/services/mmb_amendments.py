@@ -30,6 +30,8 @@ from rosapenna_backend.api.schemas.mmb_amendments import (
     AmendmentOfferSnapshot,
     AmendmentOptionAlternative,
     AmendmentPricingComparison,
+    MmbAmendmentCommitRequest,
+    MmbAmendmentCommitResponse,
     MmbAmendmentSearchRequest,
     MmbAmendmentSearchResponse,
     ProposedGolfRoundOption,
@@ -1382,3 +1384,97 @@ class MmbAmendmentService:
             "message": "Payment was settled, but amendment writes could not be completed. Original booking remains active. Staff has been notified.",
             "unconfirmed_at": now.isoformat(),
         }
+
+    def commit_amendment(
+        self,
+        request: MmbAmendmentCommitRequest,
+        engine: Any,
+    ) -> MmbAmendmentCommitResponse:
+        """Execute confirmed amendment commit through F14 Safe Operation Engine (Ticket M09).
+
+        Enforces:
+        - AC 1: Valid guest session & release gate; offer accepted & unexpired; revalidation & settlement succeeded.
+        - AC 2: Occupant review match (M10) when room/dates change.
+        - AC 3: Pre-write inventory & record version check accounting for own held stock.
+        - AC 4: Idempotent replay protection with no duplicate vendor writes.
+        - AC 5: Authoritative readback across Opera and BRS; durable linkage update.
+        - AC 6: Concurrent edit conflict detection; preservation of unrelated fields.
+        - AC 7: Supported compensation on partial failure, keeping original confirmed booking for guest.
+        - AC 8: Sanitized auditing without token/credential leakage.
+        """
+        now = _utc_now()
+        clean_ref = request.booking_reference.strip().upper()
+
+        # 1. Gate check
+        if not self.gate_service.is_enabled():
+            raise ValueError("Manage My Booking self-service amendments are temporarily disabled by management.")
+
+        # 2. Revalidation prerequisite (M07)
+        reval = self.get_revalidation(request.revalidation_id, clean_ref)
+        if not reval:
+            raise ValueError(f"Revalidation record '{request.revalidation_id}' was not found. Please revalidate before commit.")
+        if not reval.is_valid or reval.revalidation_status != "valid":
+            raise ValueError(f"Amendment revalidation status is '{reval.revalidation_status}'. Offer must pass revalidation before commit.")
+        reval_age = (now - reval.revalidated_at).total_seconds()
+        if reval_age > 900:
+            raise ValueError("Amendment revalidation has expired. Please revalidate the offer before commit.")
+        if reval.offer_id != request.offer_id:
+            raise ValueError(f"Revalidation offer ID '{reval.offer_id}' does not match requested offer ID '{request.offer_id}'.")
+
+        # 3. Accepted offer prerequisite (M06)
+        offer = self.get_amendment_offer(request.offer_id, clean_ref)
+        if not offer:
+            raise ValueError(f"Amendment offer '{request.offer_id}' was not found.")
+        if offer.status not in ("accepted", "committed"):
+            raise ValueError(f"Amendment offer '{request.offer_id}' is not in 'accepted' status (status: {offer.status}).")
+        if now > offer.expires_at:
+            raise ValueError(f"Amendment offer '{request.offer_id}' has expired. Please re-run search.")
+
+        # 4. Occupant review prerequisite (M10, AC 2)
+        if getattr(offer, "requires_occupant_review", False):
+            if not getattr(offer, "occupant_review_acknowledged", False):
+                raise ValueError("Amendment requires occupant and sharing review before commit (Ticket M10).")
+
+        # 5. Settlement prerequisite (M08, AC 1)
+        amount_due = Decimal(str(offer.amount_due_now))
+        if amount_due > Decimal("0.00"):
+            if not request.payment_id:
+                raise ValueError("Amendment requires additional balance payment before commit.")
+            payment_doc = self.get_amendment_payment(request.payment_id, clean_ref)
+            if not payment_doc or payment_doc.get("status") != "verified_paid":
+                raise ValueError("Payment has not been verified paid. Cannot commit unverified payment.")
+
+        # 6. Call BookingOperationEngine to coordinate writes and recovery
+        from rosapenna_backend.api.schemas.booking_operations import ExecuteBookingOperationRequest
+        op_req = ExecuteBookingOperationRequest(
+            operation_type="amendment",
+            booking_reference=clean_ref,
+            amendment_offer_id=request.offer_id,
+            payment_id=request.payment_id,
+            idempotency_key=request.idempotency_key,
+        )
+
+        op_res = engine.execute_operation(op_req)
+
+        # Retrieve updated linkage for revision
+        new_rev = None
+        try:
+            current_linkage = self.linkage_service.get_linkage(clean_ref)
+            new_rev = getattr(current_linkage, "booking_revision", getattr(current_linkage, "revision", len(current_linkage.audit_trail) or 1))
+        except Exception:
+            pass
+
+        return MmbAmendmentCommitResponse(
+            operation_id=op_res.operation_id,
+            booking_reference=clean_ref,
+            offer_id=request.offer_id,
+            status=op_res.status,
+            stage=op_res.stage,
+            message=op_res.message,
+            readback_verified=op_res.readback_verified,
+            staff_review_required=op_res.staff_review_required,
+            replayed=getattr(op_res, "replayed", False),
+            new_booking_revision=new_rev,
+            email_delivery_id=op_res.email_delivery_id,
+            committed_at=op_res.completed_at,
+        )

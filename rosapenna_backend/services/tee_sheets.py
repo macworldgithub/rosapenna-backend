@@ -62,6 +62,8 @@ class TeesheetCache:
 
     def check_selection(self, day, course_id):
         start, end = self.window()
+        if isinstance(day, str):
+            day = date.fromisoformat(day)
         if course_id not in COURSES:
             raise BrsUnsupportedQueryError(f"Unsupported course ID {course_id}. Supported: {list(COURSES.keys())}")
         if not start <= day <= end:
