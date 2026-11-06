@@ -55,6 +55,7 @@ class OperaStayDetails(BaseModel):
     currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
     status: str = Field(default="Reserved", max_length=50)
     occupant_names: List[str] = Field(default_factory=list)
+    assigned_room_number: Optional[str] = Field(default=None, max_length=50)
 
     @field_validator("total_amount")
     @classmethod
@@ -83,6 +84,7 @@ class BrsRoundDetails(BaseModel):
     price: str = Field(pattern=PRICE_PATTERN, max_length=11)
     currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
     status: str = Field(default="Reserved", max_length=50)
+    caddy_request_status: Optional[str] = Field(default=None, max_length=100)
 
     @field_validator("price")
     @classmethod
@@ -96,10 +98,10 @@ class PaymentLedgerEntry(BaseModel):
 
     payment_id: str = Field(min_length=1, max_length=100)
     provider: str = Field(min_length=1, max_length=50)
-    payment_type: Literal["deposit", "balance", "full"]
+    payment_type: Literal["deposit", "balance", "full", "amendment_balance", "credit"]
     amount: str = Field(pattern=PRICE_PATTERN, max_length=11)
     currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
-    status: Literal["pending", "completed", "failed", "refunded"]
+    status: Literal["pending", "completed", "failed", "refunded", "paid_unconfirmed"]
     provider_reference: Optional[str] = Field(default=None, max_length=150)
     verified_at: Optional[dt.datetime] = None
 
@@ -172,6 +174,7 @@ class BookingLinkageResponse(BaseModel):
     brs_rounds: List[BrsRoundDetails] = Field(default_factory=list)
     payments: List[PaymentLedgerEntry] = Field(default_factory=list)
     financials: Dict[str, Any] = Field(default_factory=dict)
+    revision: int = 1
     created_at: dt.datetime
     updated_at: dt.datetime
     audit_trail: List[LinkageAuditTrailEntry] = Field(default_factory=list)
@@ -191,35 +194,78 @@ class GuestBookingLookupRequest(BaseModel):
 
 
 class GuestStaySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     arrival_date: dt.date
     departure_date: dt.date
     nights: int
     room_category: str
     room_quantity: int
+    assigned_room_number: Optional[str] = None  # None indicates "Assigned upon check-in"
+    occupant_names: List[str] = Field(default_factory=list)
+    meal_plan: str = "Breakfast Included Daily"
+    source_status: Literal["confirmed", "unavailable", "stale"] = "confirmed"
+    last_synced_at: Optional[dt.datetime] = None
 
 
 class GuestGolfRoundSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     course_name: str
     date: dt.date
     time: str
-    holes: str
+    holes: str = "18"
     players: int
+    caddy_request_status: Optional[str] = None
+    source_status: Literal["confirmed", "unavailable", "stale"] = "confirmed"
 
 
 class GuestFinancialSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     total_amount: str
     deposit_paid: str
     balance_due: str
-    currency: str
+    currency: str = "EUR"
     payment_status: str
+    balance_due_date: Optional[dt.date] = None
+    ledger_verified: bool = True
+    payments_count: int = 0
+    credit_amount: Optional[str] = "0.00"
+
+
+class GuestPendingRequestSummary(BaseModel):
+    """Guest amendment or inquiry request held separately from confirmed itinerary."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    request_id: str
+    request_type: str
+    description: str
+    status: Literal["pending_review", "under_review", "approved", "declined"] = "pending_review"
+    submitted_at: dt.datetime
+    notes: Optional[str] = None
+
+
+class ComponentSourceHealth(BaseModel):
+    """Authoritative source connectivity and freshness status."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    status: Literal["confirmed", "unavailable", "stale", "partial"]
+    message: str
+    last_synced_at: Optional[dt.datetime] = None
 
 
 class GuestSafeBookingSummary(BaseModel):
     """Safe, guest-facing booking summary with zero vendor IDs or internal database IDs exposed."""
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
     booking_reference: str
     source_channel: str
     lead_guest_name: str
     stay: Optional[GuestStaySummary] = None
     golf_rounds: List[GuestGolfRoundSummary] = Field(default_factory=list)
     financials: GuestFinancialSummary
+    pending_requests: List[GuestPendingRequestSummary] = Field(default_factory=list)
+    sources_health: Dict[str, ComponentSourceHealth] = Field(default_factory=dict)
+    data_freshness_timestamp: dt.datetime
     status: str

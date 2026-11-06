@@ -48,6 +48,7 @@ class EmailDeliveryService:
         self.settings = settings or SmtpSettings()
         # In-memory sandbox log for testing/inspection
         self._dispatched_emails: List[Dict[str, Any]] = []
+        self._idempotency_records: Dict[str, EmailDeliveryResult] = {}
 
     def send_booking_confirmation(
         self,
@@ -58,7 +59,14 @@ class EmailDeliveryService:
         """Send formal booking confirmation and rendered PDF itinerary.
 
         Dispatches to lead guest and notifies reservations@rosapenna.ie.
+        Deduplicates repeat dispatches when idempotency_key is provided.
         """
+        if idempotency_key and idempotency_key in self._idempotency_records:
+            logger.info("Returning replayed email delivery for idempotency_key %s", idempotency_key)
+            replayed = self._idempotency_records[idempotency_key].model_copy()
+            replayed.idempotency_replayed = True
+            return replayed
+
         lead = booking.get("lead_guest") or {}
         recipient = recipient_override or lead.get("email")
         if not recipient:
@@ -146,7 +154,7 @@ Rosapenna Hotel & Golf Resort
                 "pdf_size": len(pdf_bytes),
                 "dispatched_at": now_str,
             })
-            return EmailDeliveryResult(
+            res = EmailDeliveryResult(
                 success=True,
                 delivery_id=delivery_id,
                 template="booking_confirmation",
@@ -157,6 +165,9 @@ Rosapenna Hotel & Golf Resort
                 status="simulated_sandbox",
                 sent_at=now_str,
             )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
 
         # 4. Live SMTP dispatch
         try:
@@ -169,7 +180,7 @@ Rosapenna Hotel & Golf Resort
                 pdf_filename=f"Rosapenna-Itinerary-{ref}.pdf",
                 cc_recipient=self.settings.hotel_reservations_email,
             )
-            return EmailDeliveryResult(
+            res = EmailDeliveryResult(
                 success=True,
                 delivery_id=delivery_id,
                 template="booking_confirmation",
@@ -180,6 +191,9 @@ Rosapenna Hotel & Golf Resort
                 status="sent",
                 sent_at=now_str,
             )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
         except Exception as exc:
             logger.error("Failed to send booking confirmation via SMTP: %s", exc)
             return EmailDeliveryResult(

@@ -12,12 +12,15 @@ from rosapenna_backend.api.routes import (
     availability,
     booking_intents,
     booking_linkage,
+    booking_operations,
     bookings,
     communications,
     golf_rounds,
     health,
     mmb_auth,
+    mmb_amendments,
     mmb_gate,
+    mmb_occupants,
     packages,
     rooms,
     staff_operations,
@@ -197,9 +200,12 @@ def create_app() -> FastAPI:
     application.include_router(packages.router)
     application.include_router(bookings.router)
     application.include_router(booking_intents.router)
+    application.include_router(booking_operations.router)
     application.include_router(communications.router)
     application.include_router(staff_operations.router)
     application.include_router(mmb_auth.router)
+    application.include_router(mmb_amendments.router)
+    application.include_router(mmb_occupants.router)
     application.include_router(mmb_gate.router)
     application.include_router(booking_linkage.router)
     return application

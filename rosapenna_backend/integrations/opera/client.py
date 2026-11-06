@@ -696,7 +696,7 @@ class OperaClient:
         # Non-production / test mode policy
         if not self.settings.allow_live_writes:
             logger.info("Opera live writes are disabled; using verified sandbox amendment.")
-            return self._generate_fixture_amendment_result(clean_id, arrival, departure, category, occupants)
+            return self._generate_fixture_amendment_result(clean_id, arrival, departure, category, occupants, request.sharing_assignments)
 
         if not self.is_configured:
             raise OperaUnavailableError("Oracle Opera Cloud integration is not configured.")
@@ -1044,6 +1044,7 @@ class OperaClient:
         departure: dt.date,
         category: str,
         occupants: List[RoomOccupant],
+        sharing_assignments: Optional[List[DateSharingAssignment]] = None,
     ) -> ReservationWriteResult:
         total = self._calculate_fixture_amount(category, arrival, departure, len(occupants))
         conf_num = f"CONF-{clean_id}"
@@ -1051,7 +1052,7 @@ class OperaClient:
         existing = self._sandbox_reservations.get(clean_id)
         quantity = existing.room_quantity if existing else 1
         room_group_id = existing.room_group_id if existing else None
-        sharing = existing.sharing_assignments if existing else []
+        sharing = sharing_assignments if sharing_assignments is not None else (existing.sharing_assignments if existing else [])
 
         detail = RoomReservationDetail(
             reservation_id=clean_id,

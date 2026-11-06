@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 
 from rosapenna_backend.api.dependencies import get_package_pricing_service
 from rosapenna_backend.api.schemas.packages import (
@@ -98,6 +98,25 @@ def handle_payment_callback(
 ):
     try:
         return pricing_service.process_payment_callback(request)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+@router.post(
+    "/prommt/webhook",
+    summary="Webhook callback from Prommt with HMAC-SHA256 signature verification (Ticket F11)",
+    description="Processes Prommt payment events (PAID_SUCCESS, etc.) idempotently with constant-time HMAC-SHA256 check.",
+)
+async def handle_prommt_webhook(
+    request: Request,
+    pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+):
+    sig = request.headers.get("X-Signature") or request.headers.get("x-signature")
+    if not sig:
+        raise HTTPException(status_code=400, detail="Missing X-Signature header")
+    body = await request.body()
+    try:
+        return pricing_service.process_prommt_webhook(body, sig)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from None
     except ValueError as exc:

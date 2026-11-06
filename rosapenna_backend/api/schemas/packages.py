@@ -194,6 +194,7 @@ class PackageRulesConfig(BaseModel):
     deposit_percent: int = 25
     balance_percent: int = 75
     balance_due_weeks: int = 6
+    st_patricks_rest_days: List[int] = Field(default_factory=lambda: [0, 1])
     minimum_rounds: List[MinimumRoundsRule] = Field(
         default_factory=lambda: [
             MinimumRoundsRule(minimum_nights=2, maximum_nights=3, rounds=2),

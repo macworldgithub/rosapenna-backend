@@ -31,6 +31,14 @@ from rosapenna_backend.api.schemas.packages import (
     RecommendedPackageOption,
     UpdatePackageRulesRequest,
 )
+import json
+from rosapenna_backend.api.schemas.booking_linkage import PaymentLedgerEntry
+from rosapenna_backend.integrations.prommt import (
+    PrommtClient,
+    PrommtCreatePaymentRequest,
+    PrommtWebhookPayload,
+)
+from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.tee_sheet import COURSES
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegrationError
@@ -47,11 +55,15 @@ class PackagePricingService:
         teesheet_cache: TeesheetCache,
         booking_store: BookingIntentStore,
         database: Optional[Database] = None,
+        prommt_client: Optional[PrommtClient] = None,
+        linkage_service: Optional[BookingLinkageService] = None,
     ):
         self.opera_client = opera_client
         self.teesheet_cache = teesheet_cache
         self.booking_store = booking_store
         self.db = database
+        self.prommt_client = prommt_client or PrommtClient()
+        self.linkage_service = linkage_service
         self.rules_collection = database["package_rules"] if database is not None else None
         self.quotes_collection = database["package_quotes"] if database is not None else None
         self.payments_collection = database["package_payments"] if database is not None else None
@@ -117,6 +129,105 @@ class PackagePricingService:
             request.reason,
         )
         return updated_rules
+
+
+    def process_prommt_webhook(
+        self,
+        raw_body: bytes,
+        signature_header: str,
+    ) -> dict:
+        """Process an official webhook callback from Prommt with HMAC-SHA256 (Ticket F11)."""
+        if not self.prommt_client.verify_webhook_signature(raw_body, signature_header):
+            logger.warning("Rejected Prommt webhook: invalid signature in X-Signature header")
+            raise ValueError("Invalid Prommt webhook signature")
+
+        try:
+            payload_json = json.loads(raw_body.decode("utf-8"))
+            event = PrommtWebhookPayload.model_validate(payload_json)
+        except Exception as exc:
+            raise ValueError(f"Malformed Prommt webhook payload: {exc}") from exc
+
+        if not self.prommt_client.verify_timestamp(event.timestamp):
+            raise ValueError("Webhook timestamp is expired or skewed")
+
+        # Correlate payment by resource_id or external_id
+        payment_doc = None
+        for p in self._payments_cache.values():
+            if p.get("prommt_request_id") == event.resource_id or p.get("booking_reference") == event.external_id:
+                payment_doc = p
+                break
+
+        if not payment_doc and self.payments_collection is not None:
+            doc = self.payments_collection.find_one({
+                "$or": [
+                    {"prommt_request_id": event.resource_id},
+                    {"booking_reference": event.external_id},
+                ]
+            })
+            if doc:
+                doc.pop("_id", None)
+                payment_doc = doc
+
+        if not payment_doc:
+            raise LookupError(f"Payment record for Prommt resource {event.resource_id} not found")
+
+        payment_id = payment_doc["payment_id"]
+        booking_ref = payment_doc.get("booking_reference")
+
+        # Idempotency check: duplicate event cannot credit twice
+        if payment_doc["status"] == "verified_paid" and event.event in ("PAID_SUCCESS", "SETTLED"):
+            logger.info("Prommt payment %s already verified_paid; idempotent return", payment_id)
+            return {
+                "status": "already_processed",
+                "payment_id": payment_id,
+                "payment_state": payment_doc["status"],
+            }
+
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+        if event.event in ("PAID_SUCCESS", "SETTLED"):
+            payment_doc["status"] = "verified_paid"
+            payment_doc["provider_reference"] = event.resource_id
+            payment_doc["paid_at"] = now_str
+
+            if self.linkage_service and booking_ref:
+                try:
+                    ledger_entry = PaymentLedgerEntry(
+                        payment_id=payment_id,
+                        provider="prommt",
+                        payment_type=payment_doc.get("payment_type", "deposit"),
+                        amount=payment_doc["amount"],
+                        currency=payment_doc["currency"],
+                        status="completed",
+                        provider_reference=event.resource_id,
+                        verified_at=dt.datetime.now(dt.timezone.utc),
+                    )
+                    self.linkage_service.record_payment(
+                        booking_reference=booking_ref,
+                        payment=ledger_entry,
+                        actor="prommt_webhook",
+                    )
+                except Exception as exc:
+                    logger.warning("Could not update linkage ledger for %s: %s", booking_ref, exc)
+        elif event.event in ("PAID_FAILED", "REFUND_SUCCESS", "REFUND_FAILED", "CANCELED"):
+            payment_doc["status"] = "failed"
+            payment_doc["failure_reason"] = f"Prommt reported {event.event}"
+            payment_doc["failed_at"] = now_str
+        elif event.event == "EXPIRED":
+            payment_doc["status"] = "expired"
+
+        self._payments_cache[payment_id] = payment_doc
+        if self.payments_collection is not None:
+            self.payments_collection.update_one(
+                {"payment_id": payment_id},
+                {"$set": payment_doc},
+            )
+
+        return {
+            "status": "success",
+            "payment_id": payment_id,
+            "payment_state": payment_doc["status"],
+            "event": event.event,
+        }
 
     def search_stay_and_golf(self, request: PackageSearchRequest) -> PackageSearchResponse:
         """Execute a live search across Opera room categories and BRS three-course tee sheets."""
@@ -259,6 +370,15 @@ class PackagePricingService:
                         sheet_res = self.teesheet_cache.get(day, cid)
                         sheet_data = sheet_res.get("data", {})
                         times = sheet_data.get("tee_times", [])
+
+                        messages = sheet_data.get("messages", [])
+                        if not times and messages:
+                            closure_text = messages[0].get("message", "").strip()
+                            if closure_text:
+                                is_closed = True
+                                closure_msg = closure_text.replace("\r\n", " ").replace("\n", " ")
+                                alt_msg = "Play Old Tom Morris Links on this date."
+                                warnings.append(f"{cname}: {closure_msg}")
 
                         for t in times:
                             slots_dict = t.get("slots", {})
@@ -632,6 +752,17 @@ class PackagePricingService:
                     matching_slots = [valid_slots[0]]
 
             if not matching_slots:
+                err_detail = f"Tee time at {round_req.time} on {round_req.date} on {course_cfg['name']} does not have capacity for {round_req.players} players."
+                try:
+                    sheet_res = self.teesheet_cache.get(round_req.date, round_req.course_id)
+                    sheet_data = sheet_res.get("data", {})
+                    if not sheet_data.get("tee_times") and sheet_data.get("messages"):
+                        b_msg = sheet_data["messages"][0].get("message", "").replace("\r\n", " ").replace("\n", " ").strip()
+                        if b_msg:
+                            err_detail = f"{course_cfg['name']} is closed on {round_req.date} ({b_msg}). Please choose an open course such as Old Tom Morris Links."
+                except Exception:
+                    pass
+
                 return self._cache_and_return_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
@@ -642,9 +773,7 @@ class PackagePricingService:
                         nights=nights,
                         balance_due_date=balance_due_date,
                         created_at=now_str,
-                        errors=[
-                            f"Tee time at {round_req.time} on {round_req.date} on {course_cfg['name']} does not have capacity for {round_req.players} players."
-                        ],
+                        errors=[err_detail],
                     )
                 )
 
@@ -833,16 +962,35 @@ class PackagePricingService:
         expires_at = now + dt.timedelta(days=7)
         reminder_at = now + dt.timedelta(days=5)
 
-        payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
+        # Create scoped Prommt payment request
+        prommt_req = PrommtCreatePaymentRequest(
+            amount=float(quote.deposit_amount),
+            currency="EUR",
+            channel="LINK",
+            payerEmail=request.lead_email,
+            payerFirstName=request.lead_first_name,
+            payerLastName=request.lead_last_name,
+            payerMobile=request.lead_phone,
+            description=f"Stay & Play Deposit for {booking_ref}",
+            externalId=booking_ref,
+            redirectUrl=f"{base_url}/booking/payment?payment_id={payment_id}&ref={booking_ref}",
+            paymentMethods=["CARD"],
+        )
+        prommt_resp = self.prommt_client.create_payment_request(prommt_req)
+        payment_url = prommt_resp.payment_url or self.prommt_client.get_payment_link(prommt_resp.resource_id)
+        if not payment_url:
+            payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
 
         payment_doc = {
             "payment_id": payment_id,
+            "prommt_request_id": prommt_resp.resource_id,
             "booking_intent_id": intent_id,
             "booking_reference": booking_ref,
             "quote_id": quote.quote_id,
             "rules_version": quote.rules_version,
             "amount": quote.deposit_amount,
             "currency": "EUR",
+            "provider": "prommt",
             "status": "unpaid",
             "lead_guest": {
                 "first_name": request.lead_first_name,
@@ -936,6 +1084,26 @@ class PackagePricingService:
             payment_doc["transaction_id"] = request.transaction_id
             payment_doc["paid_at"] = now_str
             logger.info("Payment %s verified paid with transaction %s", request.payment_id, request.transaction_id)
+            booking_ref = payment_doc.get("booking_reference")
+            if self.linkage_service and booking_ref:
+                try:
+                    ledger_entry = PaymentLedgerEntry(
+                        payment_id=request.payment_id,
+                        provider=payment_doc.get("provider", "prommt"),
+                        payment_type=payment_doc.get("payment_type", "deposit"),
+                        amount=payment_doc["amount"],
+                        currency=payment_doc.get("currency", "EUR"),
+                        status="completed",
+                        provider_reference=request.transaction_id,
+                        verified_at=dt.datetime.now(dt.timezone.utc),
+                    )
+                    self.linkage_service.record_payment(
+                        booking_reference=booking_ref,
+                        payment=ledger_entry,
+                        actor="payment_callback",
+                    )
+                except Exception as exc:
+                    logger.warning("Could not update linkage ledger for %s: %s", booking_ref, exc)
         elif request.status in ("failed", "cancelled"):
             payment_doc["status"] = "failed"
             payment_doc["failure_reason"] = f"Provider reported {request.status}"

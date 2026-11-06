@@ -5,10 +5,12 @@ from fastapi import Depends, HTTPException, Request
 from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient
 from rosapenna_backend.integrations.opera.client import OperaClient
+from rosapenna_backend.integrations.prommt import PrommtClient
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
+from rosapenna_backend.services.mmb_amendments import MmbAmendmentService
 from rosapenna_backend.services.mmb_auth import (
     ForbiddenBookingScopeError,
     InvalidSessionError,
@@ -66,6 +68,14 @@ def get_brs_booking_client(request: Request) -> BrsBookingClient:
     return client
 
 
+def get_prommt_client(request: Request) -> PrommtClient:
+    client = getattr(request.app.state, "prommt_client", None)
+    if client is None:
+        client = PrommtClient()
+        request.app.state.prommt_client = client
+    return client
+
+
 def get_package_pricing_service(request: Request) -> PackagePricingService:
     service = getattr(request.app.state, "package_pricing_service", None)
     if service is None:
@@ -73,11 +83,15 @@ def get_package_pricing_service(request: Request) -> PackagePricingService:
         teesheet_cache = get_teesheet_cache(request)
         booking_store = get_booking_intent_store(request)
         db = getattr(request.app.state, "mongo_database", None)
+        prommt_client = get_prommt_client(request)
+        linkage_service = get_booking_linkage_service(request)
         service = PackagePricingService(
             opera_client=opera_client,
             teesheet_cache=teesheet_cache,
             booking_store=booking_store,
             database=db,
+            prommt_client=prommt_client,
+            linkage_service=linkage_service,
         )
         request.app.state.package_pricing_service = service
     return service
@@ -177,6 +191,60 @@ def require_guest_booking_scope(
             detail="Access denied. Session is not authorized for this booking.",
         )
     return session
+
+
+def get_mmb_amendment_service(request: Request) -> MmbAmendmentService:
+    service = getattr(request.app.state, "mmb_amendment_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        pricing_svc = get_package_pricing_service(request)
+        gate_svc = get_mmb_gate_service(request)
+        service = MmbAmendmentService(database=db, linkage_service=linkage_svc, pricing_service=pricing_svc, gate_service=gate_svc)
+        request.app.state.mmb_amendment_service = service
+    return service
+
+
+def get_mmb_occupants_service(request: Request):
+    from rosapenna_backend.services.mmb_occupants import MmbOccupantsService
+    service = getattr(request.app.state, "mmb_occupants_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        opera_client = get_opera_client(request)
+        gate_svc = get_mmb_gate_service(request)
+        amendment_svc = get_mmb_amendment_service(request)
+        service = MmbOccupantsService(
+            database=db,
+            linkage_service=linkage_svc,
+            opera_client=opera_client,
+            gate_service=gate_svc,
+            amendment_service=amendment_svc,
+        )
+        request.app.state.mmb_occupants_service = service
+    return service
+
+
+def get_booking_operation_engine(request: Request):
+    from rosapenna_backend.services.booking_operations import BookingOperationEngine
+    engine = getattr(request.app.state, "booking_operation_engine", None)
+    if engine is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        pricing_svc = get_package_pricing_service(request)
+        linkage_svc = get_booking_linkage_service(request)
+        opera_client = get_opera_client(request)
+        brs_client = get_brs_booking_client(request)
+        email_svc = get_email_delivery_service(request)
+        engine = BookingOperationEngine(
+            database=db,
+            pricing_service=pricing_svc,
+            linkage_service=linkage_svc,
+            opera_client=opera_client,
+            brs_client=brs_client,
+            email_service=email_svc,
+        )
+        request.app.state.booking_operation_engine = engine
+    return engine
 
 
 
