@@ -15,9 +15,12 @@ class SendEmailRequest(BaseModel):
     booking_intent_id: str = Field(min_length=1, max_length=100)
     template: Literal[
         "booking_confirmation",
+        "revised_booking_confirmation",
         "special_request_acknowledgement",
+        "staff_request_outcome",
         "one_time_code",
         "balance_reminder",
+        "pre_arrival_reminder",
     ]
     recipient_email: Optional[str] = Field(default=None, max_length=254)
     recipient_name: Optional[str] = Field(default=None, max_length=120)

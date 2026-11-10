@@ -148,7 +148,7 @@ class TestMmbConfirmedDashboard(unittest.TestCase):
         self.assertEqual(summary.golf_rounds[0].caddy_request_status, "Requested (2 Caddies)")
         self.assertEqual(summary.financials.deposit_paid, "337.50")
         self.assertEqual(summary.financials.balance_due, "1012.50")
-        self.assertEqual(summary.financials.balance_due_date, dt.date(2027, 4, 16))
+        self.assertEqual(summary.financials.balance_due_date, dt.date(2027, 4, 2))  # 42 days (6 weeks) prior
         self.assertTrue(summary.financials.ledger_verified)
         self.assertEqual(summary.financials.payments_count, 1)
 

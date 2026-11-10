@@ -319,5 +319,22 @@ def get_staff_request_service(request: Request):
     return service
 
 
+def get_revised_confirmation_service(request: Request):
+    from rosapenna_backend.services.revised_confirmations import RevisedConfirmationService
+    service = getattr(request.app.state, "revised_confirmation_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        email_svc = get_email_delivery_service(request)
+        service = RevisedConfirmationService(
+            database=db,
+            linkage_service=linkage_svc,
+            email_service=email_svc,
+        )
+        request.app.state.revised_confirmation_service = service
+    return service
+
+
+
 
 

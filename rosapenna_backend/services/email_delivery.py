@@ -210,6 +210,180 @@ Rosapenna Hotel & Golf Resort
                 error_message=str(exc),
             )
 
+    def send_revised_booking_confirmation(
+        self,
+        booking: Dict[str, Any],
+        recipient_override: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+        revision_number: Optional[int] = None,
+        amendment_summary: Optional[str] = None,
+    ) -> EmailDeliveryResult:
+        """Send official revised booking confirmation and updated PDF itinerary (Ticket M15).
+
+        Dispatched only after verified vendor writes and readback.
+        Deduplicates repeat dispatches when idempotency_key is provided.
+        Dual-notifies lead guest and reservations@rosapenna.ie.
+        """
+        if idempotency_key and idempotency_key in self._idempotency_records:
+            logger.info("Returning replayed email delivery for idempotency_key %s", idempotency_key)
+            replayed = self._idempotency_records[idempotency_key].model_copy()
+            replayed.idempotency_replayed = True
+            return replayed
+
+        lead = booking.get("lead_guest") or {}
+        recipient = recipient_override or lead.get("email")
+        if not recipient:
+            return EmailDeliveryResult(
+                success=False,
+                delivery_id=str(uuid.uuid4()),
+                template="revised_booking_confirmation",
+                recipient="unknown",
+                subject="Revised Booking Confirmation",
+                status="failed",
+                sent_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                error_message="Recipient email address is missing.",
+            )
+
+        ref = booking.get("booking_reference") or booking.get("booking_intent_id", "REF-PENDING")
+        rev = revision_number or booking.get("revision_number") or booking.get("booking_revision", 1)
+        guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Valued Guest"
+        safe_guest_name = html.escape(guest_name)
+        safe_ref = html.escape(str(ref))
+        safe_summary = html.escape(amendment_summary) if amendment_summary else "Your booking arrangements have been successfully updated."
+
+        subject = f"Revised Booking Confirmation & Updated Itinerary – Rosapenna Hotel & Golf Resort ({ref} - Rev #{rev})"
+
+        # 1. Render updated authoritative PDF Itinerary matching latest revision
+        booking_for_pdf = dict(booking)
+        booking_for_pdf["revision_number"] = rev
+        pdf_bytes = build_itinerary_pdf(booking_for_pdf)
+
+        # 2. Build email body
+        mmb_section = (
+            f"<p><b>Manage Your Booking:</b> You can view your updated itinerary online at "
+            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>rosapenna.ie/manage-booking</a>.</p>"
+            if self.settings.mmb_enabled
+            else "<p><b>Manage Your Booking:</b> Online self-service is currently in preparation. "
+                 "To adjust your stay, contact Reservations at reservations@rosapenna.ie or call +353 (0)74 915 5301.</p>"
+        )
+
+        fin = booking.get("financials") or {}
+        balance_due_str = str(fin.get("balance_due", "0.00"))
+        due_date_str = str(fin.get("balance_due_date") or "Strictly 6 weeks prior to arrival")
+
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #1a202c; max-width: 650px; margin: 0 auto; padding: 20px;">
+            <div style="background-color: #1A3323; padding: 20px; text-align: center; border-bottom: 3px solid #DBB155;">
+                <h1 style="color: #ffffff; margin: 0; font-size: 22px; letter-spacing: 1px;">ROSAPENNA HOTEL & GOLF RESORT</h1>
+                <p style="color: #DBB155; margin: 5px 0 0 0; font-size: 13px;">Downings, Sheephaven Bay, Co. Donegal, Ireland</p>
+            </div>
+            <div style="padding: 25px 20px; border: 1px solid #e2e8f0; border-top: none;">
+                <p>Dear {safe_guest_name},</p>
+                <p>We are writing to confirm the <b>revised arrangements</b> for your upcoming Stay & Play reservation with Rosapenna Hotel & Golf Resort.</p>
+                <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                    <p style="margin: 0 0 5px 0;"><b>Booking Reference:</b> <span style="color: #1A3323; font-size: 16px;">{safe_ref}</span></p>
+                    <p style="margin: 0 0 5px 0;"><b>Status:</b> Confirmed (Amended)</p>
+                    <p style="margin: 0 0 5px 0;"><b>Revision Number:</b> Revision #{rev}</p>
+                    <p style="margin: 0 0 5px 0;"><b>Summary of Change:</b> {safe_summary}</p>
+                    <p style="margin: 0; color: #b91c1c;"><b>Outstanding Balance:</b> EUR {balance_due_str} (Due: {due_date_str})</p>
+                </div>
+                <p>Your complete revised itinerary, including updated hotel room reservation, links tee times, and verified payment ledger, is attached as an official PDF document to this email.</p>
+                {mmb_section}
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 25px 0;" />
+                <p style="font-size: 13px; color: #64748b;">
+                    If you have any questions or require further assistance, please contact Reservations at <a href="mailto:reservations@rosapenna.ie">reservations@rosapenna.ie</a>.<br/>
+                    We look forward to welcoming you to the magnificent links of Donegal.
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+        plain_body = f"""ROSAPENNA HOTEL & GOLF RESORT
+Revised Booking Confirmation (Revision #{rev})
+Booking Reference: {ref}
+Status: Confirmed (Amended)
+Dear {guest_name},
+
+Your revised itinerary has been confirmed and is attached as a PDF to this email.
+Outstanding Balance: EUR {balance_due_str} (Due: {due_date_str})
+
+For any questions, contact reservations@rosapenna.ie or call +353 (0)74 915 5301.
+Warm regards,
+Reservations Team
+Rosapenna Hotel & Golf Resort
+"""
+
+        delivery_id = f"DEL-REV-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        if not self.settings.allow_live_send:
+            logger.info("Email live send is disabled (EMAIL_ALLOW_LIVE_SEND=false); using simulated sandbox delivery for revised confirmation.")
+            self._dispatched_emails.append({
+                "delivery_id": delivery_id,
+                "template": "revised_booking_confirmation",
+                "recipient": recipient,
+                "hotel_copy": self.settings.hotel_reservations_email,
+                "subject": subject,
+                "revision": rev,
+                "pdf_size": len(pdf_bytes),
+                "dispatched_at": now_str,
+            })
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="revised_booking_confirmation",
+                recipient=recipient,
+                hotel_notified=True,
+                pdf_attached=True,
+                subject=subject,
+                status="simulated_sandbox",
+                sent_at=now_str,
+            )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+
+        try:
+            self._send_smtp_email(
+                recipient=recipient,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body,
+                pdf_attachment=pdf_bytes,
+                pdf_filename=f"Rosapenna-Revised-Itinerary-{ref}-Rev{rev}.pdf",
+                cc_recipient=self.settings.hotel_reservations_email,
+            )
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="revised_booking_confirmation",
+                recipient=recipient,
+                hotel_notified=True,
+                pdf_attached=True,
+                subject=subject,
+                status="sent",
+                sent_at=now_str,
+            )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+        except Exception as exc:
+            logger.error("Failed to send revised booking confirmation via SMTP: %s", exc)
+            return EmailDeliveryResult(
+                success=False,
+                delivery_id=delivery_id,
+                template="revised_booking_confirmation",
+                recipient=recipient,
+                hotel_notified=False,
+                pdf_attached=True,
+                subject=subject,
+                status="failed",
+                sent_at=now_str,
+                error_message=str(exc),
+            )
+
     def send_special_request_acknowledgement(
         self,
         booking: Dict[str, Any],
@@ -693,6 +867,194 @@ Please contact reservations@rosapenna.ie or call +353 (0)74 915 5301.
                 sent_at=now_str,
                 error_message=str(exc),
             )
+
+    def send_pre_arrival_reminder(
+        self,
+        booking: Dict[str, Any],
+        reminder_type: str,
+        recipient_override: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> EmailDeliveryResult:
+        """Send specific scheduled pre-arrival communication reminder (Ticket M15).
+
+        Supports:
+          - balance_due_first (6 weeks prior)
+          - rooming_and_caddy (6 weeks prior / immediate)
+          - concierge_check (14 days prior)
+          - balance_due_final (5 days prior)
+        """
+        if idempotency_key and idempotency_key in self._idempotency_records:
+            logger.info("Returning replayed pre-arrival reminder for idempotency_key %s", idempotency_key)
+            replayed = self._idempotency_records[idempotency_key].model_copy()
+            replayed.idempotency_replayed = True
+            return replayed
+
+        lead = booking.get("lead_guest") or {}
+        recipient = recipient_override or lead.get("email")
+        if not recipient:
+            return EmailDeliveryResult(
+                success=False,
+                delivery_id=str(uuid.uuid4()),
+                template="pre_arrival_reminder",
+                recipient="unknown",
+                subject="Pre-Arrival Reminder",
+                status="failed",
+                sent_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+                error_message="Recipient email address is missing.",
+            )
+
+        ref = booking.get("booking_reference") or booking.get("booking_intent_id", "REF-PENDING")
+        guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Valued Guest"
+        safe_guest_name = html.escape(guest_name)
+        safe_ref = html.escape(str(ref))
+
+        fin = booking.get("financials") or {}
+        balance_due_str = str(fin.get("balance_due", "0.00"))
+        due_date_str = str(fin.get("balance_due_date") or "Strictly 6 weeks prior to arrival")
+
+        mmb_info = (
+            f"<p>To view your itinerary or manage requirements, please visit "
+            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>Manage My Booking</a>.</p>"
+            if self.settings.mmb_enabled
+            else "<p>To manage your booking, please contact our Reservations team at "
+                 "<a href='mailto:reservations@rosapenna.ie'>reservations@rosapenna.ie</a> or call +353 (0)74 915 5301.</p>"
+        )
+
+        if reminder_type == "rooming_and_caddy":
+            subject = f"Pre-Arrival Rooming List & Caddy Preferences – Rosapenna ({ref})"
+            title = "Rooming List & Caddy Requirements"
+            content = f"""
+                <p>Dear {safe_guest_name},</p>
+                <p>As your stay at Rosapenna Hotel & Golf Resort approaches (Booking <b>{safe_ref}</b>), we kindly invite you to confirm your rooming party details and caddy requests.</p>
+                <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                    <p style="margin: 0 0 5px 0;"><b>Rooming Party:</b> Please provide names of all occupants sharing each room to expedite your check-in.</p>
+                    <p style="margin: 0;"><b>Caddy Requests:</b> Caddies are allocated on request and paid directly to the caddie master (EUR 90 per bag).</p>
+                </div>
+                {mmb_info}
+            """
+        elif reminder_type == "concierge_check":
+            subject = f"Concierge Welcome & Itinerary Review (14 Days Prior) – Rosapenna ({ref})"
+            title = "Concierge Welcome & 14-Day Itinerary Review"
+            content = f"""
+                <p>Dear {safe_guest_name},</p>
+                <p>We look forward to welcoming you to Rosapenna Hotel & Golf Resort in just two weeks (Booking <b>{safe_ref}</b>).</p>
+                <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                    <p style="margin: 0 0 5px 0;"><b>Check-In Time:</b> From 15:00. Check-out is by 11:00.</p>
+                    <p style="margin: 0 0 5px 0;"><b>Golf Check-In:</b> Report to the golf pavilion 20 minutes prior to your allocated links tee time.</p>
+                    <p style="margin: 0;"><b>Dress Code:</b> Traditional golf attire; soft spikes required on all three courses.</p>
+                </div>
+                {mmb_info}
+            """
+        elif reminder_type == "balance_due_final":
+            subject = f"Final Notice: Outstanding Balance Due – Rosapenna ({ref})"
+            title = "Final Balance Due Reminder (5 Days Prior)"
+            content = f"""
+                <p>Dear {safe_guest_name},</p>
+                <p>This is a final courtesy reminder regarding your outstanding balance for Booking <b>{safe_ref}</b>.</p>
+                <div style="background-color: #fff1f2; border: 1px solid #fecdd3; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                    <p style="margin: 0 0 5px 0; color: #b91c1c; font-weight: bold;">Outstanding Balance: EUR {balance_due_str}</p>
+                    <p style="margin: 0;">Please settle this balance immediately to guarantee your confirmed room and championship links tee times.</p>
+                </div>
+                {mmb_info}
+            """
+        else:  # default to balance_due_first
+            subject = f"Upcoming Stay & Balance Reminder (6 Weeks Prior) – Rosapenna ({ref})"
+            title = "Balance Payment Reminder (6 Weeks Prior)"
+            content = f"""
+                <p>Dear {safe_guest_name},</p>
+                <p>We are looking forward to welcoming you to Rosapenna Hotel & Golf Resort for Booking <b>{safe_ref}</b>.</p>
+                <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                    <p style="margin: 0 0 5px 0; color: #b91c1c; font-weight: bold;">Remaining Balance Due: EUR {balance_due_str}</p>
+                    <p style="margin: 0;"><b>Due Date:</b> {due_date_str}</p>
+                </div>
+                {mmb_info}
+            """
+
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #1a202c; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background-color: #1A3323; padding: 15px; text-align: center; border-bottom: 3px solid #DBB155;">
+                <h2 style="color: #ffffff; margin: 0; font-size: 18px;">ROSAPENNA HOTEL & GOLF RESORT</h2>
+                <p style="color: #DBB155; margin: 5px 0 0 0; font-size: 12px;">{title}</p>
+            </div>
+            <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none;">
+                {content}
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+                <p style="font-size: 12px; color: #64748b;">
+                    Reservations Team &bull; Rosapenna Hotel & Golf Resort &bull; reservations@rosapenna.ie
+                </p>
+            </div>
+        </body>
+        </html>
+        """
+
+        plain_body = f"""ROSAPENNA HOTEL & GOLF RESORT
+{title}
+Booking Reference: {ref}
+Dear {guest_name},
+Please contact reservations@rosapenna.ie or call +353 (0)74 915 5301.
+"""
+
+        delivery_id = f"DEL-REM-{uuid.uuid4().hex[:6]}"
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        if not self.settings.allow_live_send:
+            self._dispatched_emails.append({
+                "delivery_id": delivery_id,
+                "template": "pre_arrival_reminder",
+                "reminder_type": reminder_type,
+                "recipient": recipient,
+                "subject": subject,
+                "dispatched_at": now_str,
+            })
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="pre_arrival_reminder",
+                recipient=recipient,
+                hotel_notified=False,
+                pdf_attached=False,
+                subject=subject,
+                status="simulated_sandbox",
+                sent_at=now_str,
+            )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+
+        try:
+            self._send_smtp_email(
+                recipient=recipient,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body,
+            )
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="pre_arrival_reminder",
+                recipient=recipient,
+                hotel_notified=False,
+                pdf_attached=False,
+                subject=subject,
+                status="sent",
+                sent_at=now_str,
+            )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+        except Exception as exc:
+            return EmailDeliveryResult(
+                success=False,
+                delivery_id=delivery_id,
+                template="pre_arrival_reminder",
+                recipient=recipient,
+                subject=subject,
+                status="failed",
+                sent_at=now_str,
+                error_message=str(exc),
+            )
+
 
     def _send_smtp_email(
         self,

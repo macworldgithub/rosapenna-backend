@@ -88,6 +88,7 @@ class BookingOperationEngine:
         self.email_service = email_service or EmailDeliveryService()
         self.amendment_service = amendment_service
         self.occupants_service = occupants_service
+        self.database = database
 
         self.collection: Optional[Collection] = (
             database[collection_name] if database is not None else None
@@ -1052,11 +1053,13 @@ class BookingOperationEngine:
             logger.warning("Notice updating linkage for %s: %s", record.booking_reference, exc)
 
         # ---------------------------------------------------------------------
-        # Step 6: Confirmation Email (F12)
+        # Step 6: Revised Confirmation Email & Pre-arrival Reminder Reconciliation (M15)
         # ---------------------------------------------------------------------
         try:
             booking_summary = {
                 "booking_reference": record.booking_reference,
+                "revision_number": new_rev,
+                "stage": "Confirmed",
                 "lead_guest": lead_guest,
                 "hotel": {
                     "room_type": proposed_stay.room_category,
@@ -1065,27 +1068,71 @@ class BookingOperationEngine:
                     "nights": (proposed_stay.departure_date - proposed_stay.arrival_date).days,
                     "confirmation_number": opera_conf_num,
                 },
+                "stay": {
+                    "room_category": proposed_stay.room_category,
+                    "arrival_date": str(proposed_stay.arrival_date),
+                    "departure_date": str(proposed_stay.departure_date),
+                    "nights": (proposed_stay.departure_date - proposed_stay.arrival_date).days,
+                    "confirmation_number": opera_conf_num,
+                },
+                "opera_stay": {
+                    "room_category": proposed_stay.room_category,
+                    "arrival_date": str(proposed_stay.arrival_date),
+                    "departure_date": str(proposed_stay.departure_date),
+                    "room_quantity": 1,
+                    "confirmation_number": opera_conf_num,
+                },
                 "golf_rounds": [
                     {
                         "course_name": g.course_name,
                         "date": str(g.date),
                         "time": g.time,
                         "players": g.players,
+                        "holes": "18",
                     }
                     for g in proposed_golf
                 ],
                 "financials": {
                     "total_price": format(Decimal(str(new_total_val)), ".2f"),
+                    "total_amount": format(Decimal(str(new_total_val)), ".2f"),
+                    "deposit_paid": format(Decimal(str(new_total_val)) - Decimal(str(offer.pricing_comparison.revised_balance_due)), ".2f"),
+                    "balance_due": str(offer.pricing_comparison.revised_balance_due),
+                    "balance_due_date": str(offer.balance_due_date),
                     "currency": "EUR",
                 },
             }
-            email_result = self.email_service.send_booking_confirmation(
-                booking=booking_summary,
-                idempotency_key=f"email_amend_{record.operation_id}",
-            )
+            if hasattr(self.email_service, "send_revised_booking_confirmation"):
+                email_result = self.email_service.send_revised_booking_confirmation(
+                    booking=booking_summary,
+                    idempotency_key=f"email_amend_{record.operation_id}",
+                    revision_number=new_rev,
+                    amendment_summary=f"Confirmed amendment commit via operation {record.operation_id}",
+                )
+            else:
+                email_result = self.email_service.send_booking_confirmation(
+                    booking=booking_summary,
+                    idempotency_key=f"email_amend_{record.operation_id}",
+                )
             record.email_delivery_id = email_result.delivery_id
         except Exception as exc:
             logger.warning("Amendment email delivery notice: %s", exc)
+
+        # Reconcile pre-arrival reminders for new arrival date and revision
+        try:
+            from rosapenna_backend.services.revised_confirmations import RevisedConfirmationService
+            rem_svc = RevisedConfirmationService(
+                database=self.database,
+                linkage_service=self.linkage_service,
+                email_service=self.email_service,
+            )
+            rem_svc.reconcile_and_reschedule_reminders(
+                booking_reference=record.booking_reference,
+                new_arrival_date=proposed_stay.arrival_date,
+                new_revision=new_rev,
+                actor=f"amendment_commit_{record.operation_id}",
+            )
+        except Exception as exc:
+            logger.warning("Notice updating reminder schedule for %s: %s", record.booking_reference, exc)
 
         # ---------------------------------------------------------------------
         # Step 7: Mark Offer Committed & Complete Operation Record

@@ -9,7 +9,6 @@ from typing import Any, Dict
 from reportlab.lib import colors
 from reportlab.lib.pagesizes import letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.lib.units import inch
 from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
 # Brand colors
@@ -26,6 +25,7 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
 
     Includes lead guest details, booking reference, room reservation,
     championship golf rounds, verified payments, and balance due dates.
+    Supports canonical snapshots from both BookingIntentStore and BookingLinkageService.
     """
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(
@@ -89,14 +89,6 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
         leading=11,
         textColor=TEXT_DARK,
     )
-    table_cell_bold = ParagraphStyle(
-        "TableCellBold",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8.5,
-        leading=11,
-        textColor=TEXT_DARK,
-    )
     table_header = ParagraphStyle(
         "TableHeader",
         parent=styles["Normal"],
@@ -119,14 +111,18 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
 
     # 1. Header with resort branding
     ref = booking.get("booking_reference") or booking.get("booking_intent_id", "PENDING")
+    revision = booking.get("revision_number") or booking.get("booking_revision")
+    revision_text = f" (Revision #{revision})" if revision and int(revision) > 0 else ""
+    stage_text = booking.get("stage", "Confirmed").replace("_", " ").title()
+
     header_data = [
         [
             Paragraph("ROSAPENNA HOTEL & GOLF RESORT", title_style),
             Paragraph(f"<b>BOOKING REFERENCE</b><br/><font size='12' color='#1A3323'><b>{ref}</b></font>", ParagraphStyle("Ref", alignment=2, fontName="Helvetica", leading=16)),
         ],
         [
-            Paragraph("Downings, Sheephaven Bay, Co. Donegal, Ireland · reservations@rosapenna.ie", subtitle_style),
-            Paragraph(f"Status: <b>{booking.get('stage', 'Confirmed').replace('_', ' ').title()}</b>", ParagraphStyle("Status", alignment=2, fontName="Helvetica", fontSize=9, textColor=DARK_GREEN)),
+            Paragraph("Downings, Sheephaven Bay, Co. Donegal, Ireland &bull; reservations@rosapenna.ie", subtitle_style),
+            Paragraph(f"Status: <b>{stage_text}{revision_text}</b>", ParagraphStyle("Status", alignment=2, fontName="Helvetica", fontSize=9, textColor=DARK_GREEN)),
         ],
     ]
     header_table = Table(header_data, colWidths=[340, 200])
@@ -142,8 +138,8 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
     # 2. Lead Guest Details
     lead = booking.get("lead_guest") or {}
     guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Valued Guest"
-    guest_email = lead.get("email", "—")
-    guest_phone = lead.get("telephone", "—")
+    guest_email = lead.get("email", "")
+    guest_phone = lead.get("telephone", "")
 
     guest_data = [
         [
@@ -172,16 +168,24 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
     elements.append(guest_table)
     elements.append(Spacer(1, 14))
 
-    # 3. Accommodation Details (Opera Cloud)
-    opera_res = booking.get("links", {}).get("opera_reservation")
+    # 3. Accommodation Details (Opera Cloud / Canonical Snapshot)
+    opera_res = (
+        booking.get("links", {}).get("opera_reservation")
+        or booking.get("opera_stay")
+        or booking.get("stay")
+        or booking.get("hotel")
+    )
     elements.append(Paragraph("Accommodation Details", section_heading))
 
+    arr_date_val = None
     if opera_res:
-        arr_date = opera_res.get("arrival_date", "—")
-        dep_date = opera_res.get("departure_date", "—")
-        room_cat = opera_res.get("room_category", "Standard Room").replace("_", " ").title()
+        arr_date = opera_res.get("arrival_date", "")
+        dep_date = opera_res.get("departure_date", "")
+        arr_date_val = arr_date
+        room_cat = (opera_res.get("room_category") or opera_res.get("room_type") or "Standard Room").replace("_", " ").title()
         room_qty = opera_res.get("room_quantity", 1)
-        conf_num = opera_res.get("confirmation_number") or opera_res.get("reservation_id", "—")
+        conf_num = opera_res.get("confirmation_number") or opera_res.get("reservation_id", "")
+        occupant_names = opera_res.get("occupant_names") or []
 
         room_data = [
             [
@@ -213,14 +217,25 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
         ]))
         elements.append(room_table)
         elements.append(Spacer(1, 4))
+
+        if occupant_names:
+            occ_list_str = ", ".join(occupant_names)
+            elements.append(Paragraph(f"<font size='8' color='#334155'><b>Occupants:</b> {occ_list_str}</font>", subtitle_style))
+            elements.append(Spacer(1, 2))
+
         elements.append(Paragraph("<font size='7.5' color='#64748B'>* Note: Hotel allocates physical room numbers approximately 2 days prior to arrival.</font>", subtitle_style))
     else:
         elements.append(Paragraph("No hotel accommodation linked to this booking.", table_cell))
 
     elements.append(Spacer(1, 14))
 
-    # 4. Championship Golf Rounds (BRS Golf)
-    brs_rounds = booking.get("links", {}).get("brs_rounds", [])
+    # 4. Championship Golf Rounds (BRS Golf / Canonical Snapshot)
+    brs_rounds = (
+        booking.get("links", {}).get("brs_rounds")
+        or booking.get("brs_rounds")
+        or booking.get("golf_rounds")
+        or []
+    )
     elements.append(Paragraph("Championship Links Golf", section_heading))
 
     if brs_rounds:
@@ -237,13 +252,17 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
         for r in brs_rounds:
             caddy_info = "None"
             cad_req = r.get("caddy_request")
-            if cad_req and cad_req.get("caddies_requested", 0) > 0:
+            if isinstance(cad_req, dict) and cad_req.get("caddies_requested", 0) > 0:
                 caddy_info = f"{cad_req['caddies_requested']} {cad_req.get('caddy_category', 'caddie').title()}(s)"
+            elif isinstance(cad_req, str):
+                caddy_info = cad_req
+            elif r.get("caddy_request_status"):
+                caddy_info = str(r["caddy_request_status"])
 
             golf_data.append([
                 Paragraph(f"<b>{r.get('course_name', 'Championship Links')}</b>", table_cell),
-                Paragraph(str(r.get("date", "—")), table_cell),
-                Paragraph(str(r.get("time", "—")), table_cell),
+                Paragraph(str(r.get("date", "")), table_cell),
+                Paragraph(str(r.get("time", "")), table_cell),
                 Paragraph(f"{r.get('players', 1)} golfer(s)", table_cell),
                 Paragraph(str(r.get("holes", "18")), table_cell),
                 Paragraph(caddy_info, table_cell),
@@ -261,42 +280,70 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
         ]))
         elements.append(golf_table)
         elements.append(Spacer(1, 4))
-        elements.append(Paragraph("<font size='7.5' color='#64748B'>* Note: Caddies are availability requests payable directly to the caddie master on the day of play (€90 per bag).</font>", subtitle_style))
+        elements.append(Paragraph("<font size='7.5' color='#64748B'>* Note: Caddies are availability requests payable directly to the caddie master on the day of play (EUR 90 per bag).</font>", subtitle_style))
     else:
         elements.append(Paragraph("No golf rounds linked to this booking.", table_cell))
 
     elements.append(Spacer(1, 14))
 
-    # 5. Financial Summary & Verified Ledger (F05)
+    # 5. Financial Summary & Verified Ledger (F05 / Canonical Snapshot)
     elements.append(Paragraph("Payment & Financial Ledger", section_heading))
 
-    # Calculate total and paid amount
-    total_val = "0.00"
-    if "quote" in booking and "selected" in booking["quote"]:
-        total_val = str(booking["quote"]["selected"].get("amount") or booking["quote"]["selected"].get("price", "0.00"))
-    elif "selection" in booking:
-        total_val = str(booking["selection"].get("price", "0.00"))
+    # Determine financials
+    fin = booking.get("financials") or {}
+    total_num = 0.0
+    verified_paid = 0.0
+    balance_due = 0.0
+    balance_due_date_str = ""
 
-    payments = booking.get("links", {}).get("payments", [])
-    verified_paid = sum(
-        (float(p.get("amount", 0.0)) for p in payments if p.get("status") == "completed"),
-        0.0,
-    )
-    total_num = float(total_val)
-    balance_due = max(0.0, total_num - verified_paid)
+    if fin:
+        total_num = float(fin.get("total_amount") or fin.get("total_price", 0.0))
+        verified_paid = float(fin.get("deposit_paid", 0.0))
+        balance_due = float(fin.get("balance_due", 0.0))
+        if fin.get("balance_due_date"):
+            balance_due_date_str = str(fin["balance_due_date"])
+    else:
+        # Calculate from quote or selection
+        total_val = "0.00"
+        if "quote" in booking and "selected" in booking["quote"]:
+            total_val = str(booking["quote"]["selected"].get("amount") or booking["quote"]["selected"].get("price", "0.00"))
+        elif "selection" in booking:
+            total_val = str(booking["selection"].get("price", "0.00"))
+        total_num = float(total_val)
+
+        payments = booking.get("links", {}).get("payments") or booking.get("payments") or []
+        verified_paid = sum(
+            (float(p.get("amount", 0.0)) for p in payments if p.get("status") in {"completed", "captured", "paid"}),
+            0.0,
+        )
+        balance_due = max(0.0, total_num - verified_paid)
+
+    # Calculate authoritative 42-day balance due date if not explicit
+    if not balance_due_date_str and arr_date_val:
+        try:
+            arr_dt = dt.date.fromisoformat(str(arr_date_val).split("T")[0])
+            bal_dt = arr_dt - dt.timedelta(days=42)
+            balance_due_date_str = bal_dt.strftime("%d %B %Y")
+        except Exception:
+            pass
+
+    if balance_due_date_str:
+        due_label = f"{balance_due_date_str} (Strictly 6 weeks prior)"
+    else:
+        due_label = "6 Weeks Prior to Arrival"
 
     finance_data = [
         [
             Paragraph("Total Package Price (inc. VAT):", label_style),
-            Paragraph(f"<b>€{total_num:,.2f}</b>", value_style),
+            Paragraph(f"<b>EUR {total_num:,.2f}</b>", value_style),
             Paragraph("Verified Paid to Date:", label_style),
-            Paragraph(f"<b>€{verified_paid:,.2f}</b>", value_style),
+            Paragraph(f"<b>EUR {verified_paid:,.2f}</b>", value_style),
         ],
         [
             Paragraph("Remaining Balance Due:", label_style),
-            Paragraph(f"<font color='#B91C1C'><b>€{balance_due:,.2f}</b></font>", value_style),
+            Paragraph(f"<font color='#B91C1C'><b>EUR {balance_due:,.2f}</b></font>", value_style),
             Paragraph("Balance Due Date:", label_style),
-            Paragraph("6 Weeks Prior to Arrival", value_style),
+            Paragraph(due_label, value_style),
         ],
     ]
     finance_table = Table(finance_data, colWidths=[170, 100, 150, 120])
@@ -317,14 +364,14 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
     policy_text = (
         "<b>Check-In:</b> From 15:00. <b>Check-Out:</b> By 11:00.<br/>"
         "<b>Deposit & Cancellation:</b> A 25% non-refundable deposit applies to all confirmed bookings. "
-        "The remaining 75% balance is due 6 weeks prior to arrival.<br/>"
+        "The remaining 75% balance is strictly due 6 weeks (42 days) prior to arrival.<br/>"
         "<b>Golf Dress Code:</b> Traditional golf attire is required. Soft spikes only on all three links courses.<br/>"
         "<b>Need Assistance?</b> Contact Reservations at reservations@rosapenna.ie or +353 (0)74 915 5301."
     )
     elements.append(Paragraph(policy_text, table_cell))
     elements.append(Spacer(1, 15))
     elements.append(HRFlowable(width="100%", thickness=0.5, color=BORDER_COLOR, spaceAfter=8))
-    elements.append(Paragraph("Rosapenna Hotel & Golf Resort · Official Itinerary Document · Generated Securely", footer_style))
+    elements.append(Paragraph("Rosapenna Hotel & Golf Resort &bull; Official Itinerary Document &bull; Generated Securely", footer_style))
 
     doc.build(elements)
     buffer.seek(0)

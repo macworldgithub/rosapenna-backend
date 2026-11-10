@@ -460,7 +460,8 @@ class BookingLinkageService:
             arr = dt.date.fromisoformat(opera_stay["arrival_date"]) if isinstance(opera_stay["arrival_date"], str) else opera_stay["arrival_date"]
             dep = dt.date.fromisoformat(opera_stay["departure_date"]) if isinstance(opera_stay["departure_date"], str) else opera_stay["departure_date"]
             nights = max(1, (dep - arr).days)
-            balance_due_date = arr - dt.timedelta(days=28)
+            # Contractual policy: balance 75% is strictly due 6 weeks (42 days) prior to arrival
+            balance_due_date = arr - dt.timedelta(days=42)
             stay_summary = GuestStaySummary(
                 arrival_date=arr,
                 departure_date=dep,
