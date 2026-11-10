@@ -154,7 +154,25 @@ class RoomReservationDetail(BaseModel):
     room_number: Optional[str] = None  # Note: Hotel-owned allocation; None until assigned
     occupants: List[RoomOccupant] = Field(default_factory=list)
     sharing_assignments: List[DateSharingAssignment] = Field(default_factory=list)
+    guest_phone: Optional[str] = None
     total_amount: float
     currency: str = "EUR"
     source: str = "opera_cloud"
     retrieved_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
+
+
+class ReservationPhoneSnapshot(BaseModel):
+    """Snapshot of telephone record verified directly from Opera PMS."""
+    reservation_id: str
+    phone_number: Optional[str] = None
+    observed_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))
+    source: str = "opera_cloud"
+
+
+class PhoneWriteEvidence(BaseModel):
+    """Evidence of a narrow, verified Opera reservation telephone update."""
+    reservation_id: str
+    phone_number: str
+    verified_via_readback: bool = True
+    idempotency_key: Optional[str] = None
+    updated_at: dt.datetime = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc))

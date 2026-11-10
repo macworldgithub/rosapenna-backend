@@ -370,9 +370,8 @@ class MmbAuthService:
         self.sessions_col.insert_one(session_record)
 
         logger.info(
-            "Guest session issued for booking %s (token prefix: %s..., expires in %d mins)",
+            "Guest session issued for booking %s (expires in %d mins)",
             clean_ref,
-            session_token[:16],
             SESSION_EXPIRY_MINUTES,
         )
 

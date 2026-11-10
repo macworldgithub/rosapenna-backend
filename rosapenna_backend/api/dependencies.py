@@ -251,4 +251,20 @@ def get_booking_operation_engine(request: Request):
     return engine
 
 
+def get_mmb_contact_service(request: Request):
+    from rosapenna_backend.services.mmb_contact import MmbContactService
+    service = getattr(request.app.state, "mmb_contact_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        opera_client = get_opera_client(request)
+        service = MmbContactService(
+            database=db,
+            linkage_service=linkage_svc,
+            opera_client=opera_client,
+        )
+        request.app.state.mmb_contact_service = service
+    return service
+
+
 

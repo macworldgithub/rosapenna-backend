@@ -17,6 +17,8 @@ from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.opera.schemas import (
     CreateReservationRequest,
     DateSharingAssignment,
+    PhoneWriteEvidence,
+    ReservationPhoneSnapshot,
     ReservationWriteResult,
     RoomAvailabilityResponse,
     RoomCategoryAvailability,
@@ -107,6 +109,7 @@ class OperaClient:
         self._token_expires_at: float = 0.0
         self._token_fallback_attempted: bool = False
         self._sandbox_reservations: Dict[str, RoomReservationDetail] = {}
+        self._sandbox_phones: Dict[str, str] = {}
 
     @property
     def is_configured(self) -> bool:
@@ -457,6 +460,20 @@ class OperaClient:
                         is_primary=True,
                     ))
 
+        guest_phone = None
+        if res_data.get("reservationGuests"):
+            for rg in res_data.get("reservationGuests", []):
+                profile = rg.get("profileInfo", {}).get("profile", {}).get("customer", {})
+                telephones = profile.get("telephones", {}).get("telephoneInfo", [])
+                if telephones and isinstance(telephones, list):
+                    phone_entry = telephones[0].get("telephone", {})
+                    phone_val = phone_entry.get("phoneNumber")
+                    if phone_val:
+                        guest_phone = str(phone_val).strip()
+                        break
+        if not guest_phone and reservation_id in self._sandbox_phones:
+            guest_phone = self._sandbox_phones[reservation_id]
+
         total_amount = float(stay_info.get("totalAmount", 0.0))
         currency = stay_info.get("currencyCode", "EUR")
 
@@ -470,6 +487,7 @@ class OperaClient:
             room_category=room_category,
             room_number=room_num,
             occupants=occupants,
+            guest_phone=guest_phone,
             total_amount=total_amount,
             currency=currency,
             source="opera_cloud",
@@ -770,6 +788,162 @@ class OperaClient:
             currency=readback.currency,
             source="opera_cloud",
             verified_via_readback=True,
+        )
+
+    def get_reservation_phone(self, reservation_id: str) -> ReservationPhoneSnapshot:
+        """Lookup verified telephone snapshot for lead guest from Opera reservation."""
+        clean_id = reservation_id.strip()
+        if not clean_id:
+            raise OperaIntegrationError("A valid reservation_id is required.", status_code=400, detail_code="invalid_id")
+
+        if clean_id in self._sandbox_phones:
+            return ReservationPhoneSnapshot(
+                reservation_id=clean_id,
+                phone_number=self._sandbox_phones[clean_id],
+                source="sandbox_state",
+            )
+
+        if clean_id in self._sandbox_reservations:
+            res = self._sandbox_reservations[clean_id]
+            return ReservationPhoneSnapshot(
+                reservation_id=clean_id,
+                phone_number=res.guest_phone,
+                source="sandbox_reservation",
+            )
+
+        detail = self.get_reservation(clean_id)
+        return ReservationPhoneSnapshot(
+            reservation_id=clean_id,
+            phone_number=detail.guest_phone,
+            source=detail.source,
+        )
+
+    def update_reservation_phone(
+        self,
+        reservation_id: str,
+        phone_number: str,
+        idempotency_key: Optional[str] = None,
+    ) -> PhoneWriteEvidence:
+        """Narrowly update the lead guest telephone on an existing Opera reservation without altering stay, rates, occupants or profiles."""
+        clean_id = reservation_id.strip()
+        clean_phone = phone_number.strip()
+        if not clean_id:
+            raise OperaIntegrationError("A valid reservation_id is required.", status_code=400, detail_code="invalid_id")
+        if not clean_phone:
+            raise OperaIntegrationError("A valid phone_number is required.", status_code=400, detail_code="invalid_phone")
+
+        current = self.get_reservation(clean_id)
+        if current.status in {"Cancelled", "CheckedOut"}:
+            raise OperaConflictError(f"Cannot update phone on reservation '{clean_id}' because status is '{current.status}'.")
+
+        # Non-production / test mode policy
+        if not self.settings.allow_live_writes:
+            logger.info("Opera live writes are disabled; updating phone via verified sandbox.")
+            self._sandbox_phones[clean_id] = clean_phone
+            if clean_id in self._sandbox_reservations:
+                self._sandbox_reservations[clean_id].guest_phone = clean_phone
+
+            # Strict post-write readback verification
+            readback = self.get_reservation_phone(clean_id)
+            if readback.phone_number != clean_phone:
+                raise OperaReadbackMismatchError(
+                    f"Opera phone readback mismatch: expected {clean_phone}, got {readback.phone_number}"
+                )
+
+            return PhoneWriteEvidence(
+                reservation_id=clean_id,
+                phone_number=clean_phone,
+                verified_via_readback=True,
+                idempotency_key=idempotency_key,
+            )
+
+        # Production path:
+        if not self.is_configured:
+            raise OperaUnavailableError("Oracle Opera Cloud integration is not configured.")
+
+        if self.settings.production_domain:
+            parsed_host = urllib.parse.urlparse(self.settings.effective_gateway).netloc.split(":")[0]
+            if parsed_host != self.settings.production_domain:
+                raise OperaPermissionError(
+                    f"Opera live write blocked: gateway host '{parsed_host}' does not match production domain '{self.settings.production_domain}'."
+                )
+
+        token = self._get_oauth_token()
+        gateway = self.settings.effective_gateway
+        hotel_id = self.settings.hotel_id.strip()
+        app_key = self.settings.app_key.get_secret_value().strip()
+
+        # Narrow OHIP reservation telephone update
+        url = f"{gateway}/rsv/v1/hotels/{hotel_id}/reservations/{urllib.parse.quote(clean_id)}"
+        headers = {
+            "Authorization": f"Bearer {token}",
+            "x-app-key": app_key,
+            "x-hotelid": hotel_id,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        if self.settings.enterprise_id:
+            headers["enterpriseId"] = self.settings.enterprise_id
+
+        # Narrow payload targeting only reservation lead guest telephone
+        primary_guest = next((occ for occ in current.occupants if occ.is_primary), current.occupants[0] if current.occupants else None)
+        given_name = primary_guest.first_name if primary_guest else "Guest"
+        surname = primary_guest.last_name if primary_guest else "Guest"
+
+        payload = {
+            "reservation": {
+                "reservationGuests": [
+                    {
+                        "profileInfo": {
+                            "profile": {
+                                "customer": {
+                                    "personName": [{"givenName": given_name, "surname": surname}],
+                                    "telephones": {
+                                        "telephoneInfo": [{"telephone": {"phoneNumber": clean_phone}}]
+                                    },
+                                }
+                            }
+                        }
+                    }
+                ]
+            }
+        }
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
+
+        try:
+            with urllib.request.urlopen(req, timeout=self.settings.timeout_seconds) as resp:
+                pass
+        except urllib.error.HTTPError as exc:
+            logger.error("Opera reservation telephone update failed with HTTP %d", exc.code)
+            if exc.code == 401:
+                self._cached_token = None
+                raise OperaAuthError() from exc
+            if exc.code == 403:
+                raise OperaPermissionError() from exc
+            if exc.code == 404:
+                raise OperaNotFoundError(f"Reservation '{clean_id}' was not found.") from exc
+            if exc.code == 409:
+                raise OperaConflictError() from exc
+            if exc.code == 429:
+                raise OperaRateLimitError() from exc
+            raise OperaUnavailableError(f"Opera Cloud reservation returned HTTP {exc.code}") from exc
+        except (urllib.error.URLError, TimeoutError) as exc:
+            logger.error("Opera reservation telephone update connection failed (%s)", type(exc).__name__)
+            raise OperaUnavailableError("Could not connect to Opera Cloud reservation endpoint.") from exc
+
+        # Authoritative independent readback
+        readback = self.get_reservation_phone(clean_id)
+        if readback.phone_number != clean_phone:
+            raise OperaReadbackMismatchError(
+                f"Opera phone readback mismatch: expected {clean_phone}, got {readback.phone_number}"
+            )
+
+        return PhoneWriteEvidence(
+            reservation_id=clean_id,
+            phone_number=clean_phone,
+            verified_via_readback=True,
+            idempotency_key=idempotency_key,
         )
 
     def _verify_readback(

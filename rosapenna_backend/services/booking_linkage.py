@@ -666,3 +666,56 @@ class BookingLinkageService:
             verified_at=_utc_now(),
         )
         return self.record_payment(booking_reference=booking_reference, payment=ledger_entry, actor=actor)
+
+    def update_lead_phone(
+        self,
+        booking_reference: str,
+        phone_number: str,
+        actor: str,
+        reason: str,
+        expected_revision: int,
+    ) -> BookingLinkageResponse:
+        """Atomic update of lead guest telephone on booking linkage without altering stay, rates, occupants or profiles."""
+        if self.collection is None:
+            raise LinkageNotFoundError("Storage is not configured.")
+
+        clean_ref = booking_reference.strip().upper()
+        existing = self.collection.find_one({"booking_reference": clean_ref})
+        if existing is None:
+            raise LinkageNotFoundError(f"Booking reference '{booking_reference}' was not found.")
+
+        current_rev = int(existing.get("revision", 1))
+        if current_rev != expected_revision:
+            raise LinkageConflictError(
+                f"Booking revision conflict: expected {expected_revision}, current is {current_rev}. Please refresh."
+            )
+
+        now = _utc_now()
+        before_phone = existing.get("lead_guest", {}).get("telephone")
+        audit_entry = LinkageAuditTrailEntry(
+            audit_id=f"aud_{uuid.uuid4().hex[:12]}",
+            actor=actor,
+            action="guest_phone_updated",
+            occurred_at=now,
+            reason=reason,
+            before_state={"telephone": before_phone, "revision": current_rev},
+            after_state={"telephone": phone_number, "revision": current_rev + 1},
+        )
+
+        res = self.collection.update_one(
+            {"booking_reference": clean_ref, "revision": expected_revision},
+            {
+                "$set": {
+                    "lead_guest.telephone": phone_number,
+                    "updated_at": now,
+                },
+                "$inc": {"revision": 1},
+                "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
+            },
+        )
+        if res.matched_count == 0:
+            raise LinkageConflictError("Concurrent booking update detected. Please refresh.")
+
+        updated_doc = self.collection.find_one({"booking_reference": clean_ref})
+        assert updated_doc is not None
+        return BookingLinkageResponse(**updated_doc)
