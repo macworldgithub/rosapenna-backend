@@ -798,3 +798,81 @@ class BookingLinkageService:
         updated_doc = self.collection.find_one({"booking_reference": clean_ref})
         assert updated_doc is not None
         return BookingLinkageResponse(**updated_doc)
+
+    def add_pending_request(
+        self,
+        booking_reference: str,
+        request_item: Dict[str, Any],
+        actor: str,
+        expected_revision: Optional[int] = None,
+    ) -> BookingLinkageResponse:
+        """Atomically append a special or cancellation request to pending_requests.
+
+        Enforces:
+        - M13 AC 1 & 2: Stored against authenticated booking, receives unique durable ID, pending_review state.
+        - M13 AC 5 & 6: Zero mutation to rooms, golf rounds, or payments ledger.
+        - Immutable audit logging of request submission.
+        - Optional optimistic revision guard.
+        """
+        if self.collection is None:
+            raise LinkageNotFoundError("Storage is not configured.")
+
+        clean_ref = booking_reference.strip().upper()
+        existing = self.collection.find_one({"booking_reference": clean_ref})
+        if not existing:
+            raise LinkageNotFoundError(f"Booking reference '{clean_ref}' not found.")
+
+        current_rev = existing.get("revision", 1)
+        if expected_revision is not None and current_rev != expected_revision:
+            raise LinkageConflictError(
+                f"Booking revision conflict: expected {expected_revision}, current is {current_rev}."
+            )
+
+        now = _utc_now()
+        req_id = request_item.get("request_id") or f"REQ-{uuid.uuid4().hex[:8].upper()}"
+        req_type = request_item.get("request_type", "general_inquiry")
+
+        stored_request = {
+            "request_id": req_id,
+            "request_type": req_type,
+            "category": request_item.get("category", "other"),
+            "description": request_item.get("description", "Pending booking request"),
+            "desired_dates": request_item.get("desired_dates"),
+            "desired_room_category": request_item.get("desired_room_category"),
+            "desired_golf_notes": request_item.get("desired_golf_notes"),
+            "status": "pending_review",
+            "submitted_at": now,
+            "notes": request_item.get("notes"),
+        }
+
+        audit_entry = LinkageAuditTrailEntry(
+            audit_id=f"aud_{uuid.uuid4().hex[:12]}",
+            actor=actor,
+            action="guest_request_submitted",
+            occurred_at=now,
+            reason=f"Guest submitted {req_type} request ({req_id})",
+            before_state={"pending_requests_count": len(existing.get("pending_requests", [])), "revision": current_rev},
+            after_state={"request_id": req_id, "request_type": req_type, "revision": current_rev + 1},
+        )
+
+        filter_criteria: Dict[str, Any] = {"booking_reference": clean_ref}
+        if expected_revision is not None:
+            filter_criteria["revision"] = expected_revision
+
+        res = self.collection.update_one(
+            filter_criteria,
+            {
+                "$push": {
+                    "pending_requests": stored_request,
+                    "audit_trail": audit_entry.model_dump(mode="json"),
+                },
+                "$inc": {"revision": 1},
+                "$set": {"updated_at": now},
+            },
+        )
+        if res.matched_count == 0:
+            raise LinkageConflictError("Concurrent booking update detected. Please refresh.")
+
+        updated_doc = self.collection.find_one({"booking_reference": clean_ref})
+        assert updated_doc is not None
+        return BookingLinkageResponse(**updated_doc)

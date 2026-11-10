@@ -9,6 +9,7 @@ import uuid
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+import html
 from typing import Any, Dict, List, Optional
 
 from pydantic import Field, SecretStr
@@ -223,6 +224,10 @@ Rosapenna Hotel & Golf Resort
         recipient = lead.get("email") or "guest@example.com"
         ref = booking.get("booking_reference") or booking.get("booking_intent_id", "REF-PENDING")
         guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Valued Guest"
+        safe_guest_name = html.escape(guest_name)
+        safe_ref = html.escape(str(ref))
+        safe_request_text = html.escape(request_text)
+        safe_category = html.escape(category.replace("_", " ").title())
         subject = f"Special Request Received — Booking {ref}"
         delivery_id = f"DEL-REQ-{uuid.uuid4().hex[:6]}"
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -234,12 +239,12 @@ Rosapenna Hotel & Golf Resort
                 <h2 style="color: #ffffff; margin: 0; font-size: 18px;">ROSAPENNA HOTEL & GOLF RESORT</h2>
             </div>
             <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none;">
-                <p>Dear {guest_name},</p>
-                <p>We have received your special request regarding booking <b>{ref}</b>:</p>
-                <blockquote style="background-color: #f8fafc; border-left: 4px solid #DBB155; padding: 12px; margin: 15px 0; color: #334155;">
-                    <i>"{request_text}"</i>
+                <p>Dear {safe_guest_name},</p>
+                <p>We have received your request ({safe_category}) regarding booking <b>{safe_ref}</b>:</p>
+                <blockquote style="background-color: #f8fafc; border-left: 4px solid #DBB155; padding: 12px; margin: 15px 0; color: #334155; white-space: pre-wrap;">
+                    <i>"{safe_request_text}"</i>
                 </blockquote>
-                <p>Your request has been forwarded to our Reservations and Concierge team and is currently <b>pending staff review</b>. Please note that special requests are subject to resort availability and do not modify your confirmed stay dates or golf tee times.</p>
+                <p>Your request has been forwarded to our Reservations and Concierge team and is currently <b>pending staff review</b>. Please note that special requests and cancellation requests are subject to hotel staff review and verification; confirmed stay dates, golf tee times, inventory, and payment ledger entries remain completely unchanged until authorized and confirmed.</p>
                 <p>Our team will follow up directly if further arrangements or verification are required.</p>
                 <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
                 <p style="font-size: 12px; color: #64748b;">Rosapenna Reservations Team · reservations@rosapenna.ie</p>
@@ -265,6 +270,7 @@ Reservations Team · Rosapenna Hotel & Golf Resort
                 "hotel_copy": self.settings.hotel_reservations_email,
                 "subject": subject,
                 "request_text": request_text,
+                "html_preview": html_body,
                 "dispatched_at": now_str,
             })
             return EmailDeliveryResult(

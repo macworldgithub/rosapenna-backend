@@ -283,5 +283,21 @@ def get_mmb_caddy_service(request: Request):
     return service
 
 
+def get_mmb_request_service(request: Request):
+    from rosapenna_backend.services.mmb_requests import MmbRequestService
+    service = getattr(request.app.state, "mmb_request_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        email_svc = get_email_delivery_service(request)
+        service = MmbRequestService(
+            database=db,
+            linkage_service=linkage_svc,
+            email_service=email_svc,
+        )
+        request.app.state.mmb_request_service = service
+    return service
+
+
 
 
