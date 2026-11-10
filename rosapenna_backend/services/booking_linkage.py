@@ -719,3 +719,82 @@ class BookingLinkageService:
         updated_doc = self.collection.find_one({"booking_reference": clean_ref})
         assert updated_doc is not None
         return BookingLinkageResponse(**updated_doc)
+
+    def update_round_caddy(
+        self,
+        booking_reference: str,
+        round_id: str,
+        caddy_status: str,
+        caddy_data: Optional[Dict[str, Any]],
+        actor: str,
+        reason: str,
+        expected_revision: int,
+    ) -> BookingLinkageResponse:
+        """Atomic update of caddy request attached to a specific confirmed golf round."""
+        if self.collection is None:
+            raise LinkageNotFoundError("Storage is not configured.")
+
+        clean_ref = booking_reference.strip().upper()
+        clean_round_id = round_id.strip()
+
+        existing = self.collection.find_one({"booking_reference": clean_ref})
+        if existing is None:
+            raise LinkageNotFoundError(f"Booking reference '{booking_reference}' was not found.")
+
+        current_rev = int(existing.get("revision", 1))
+        if current_rev != expected_revision:
+            raise LinkageConflictError(
+                f"Booking revision conflict: expected {expected_revision}, current is {current_rev}. Please refresh."
+            )
+
+        rounds = existing.get("brs_rounds", [])
+        target_round = next((r for r in rounds if r.get("round_id") == clean_round_id), None)
+        if not target_round:
+            raise LinkageNotFoundError(f"Golf round '{clean_round_id}' not found on booking '{clean_ref}'.")
+
+        now = _utc_now()
+        before_status = target_round.get("caddy_request_status")
+        before_caddy = target_round.get("caddy_request")
+
+        audit_entry = LinkageAuditTrailEntry(
+            audit_id=f"aud_{uuid.uuid4().hex[:12]}",
+            actor=actor,
+            action="round_caddy_updated",
+            occurred_at=now,
+            reason=reason,
+            before_state={
+                "round_id": clean_round_id,
+                "caddy_status": before_status,
+                "caddy_request": before_caddy,
+                "revision": current_rev,
+            },
+            after_state={
+                "round_id": clean_round_id,
+                "caddy_status": caddy_status,
+                "caddy_request": caddy_data,
+                "revision": current_rev + 1,
+            },
+        )
+
+        res = self.collection.update_one(
+            {
+                "booking_reference": clean_ref,
+                "revision": expected_revision,
+                "brs_rounds.round_id": clean_round_id,
+            },
+            {
+                "$set": {
+                    "brs_rounds.$.caddy_request_status": caddy_status,
+                    "brs_rounds.$.caddy_request": caddy_data,
+                    "updated_at": now,
+                },
+                "$inc": {"revision": 1},
+                "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
+            },
+        )
+        if res.matched_count == 0:
+            raise LinkageConflictError("Concurrent booking update detected. Please refresh.")
+
+        updated_doc = self.collection.find_one({"booking_reference": clean_ref})
+        assert updated_doc is not None
+        return BookingLinkageResponse(**updated_doc)

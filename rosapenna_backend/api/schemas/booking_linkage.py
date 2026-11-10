@@ -85,6 +85,7 @@ class BrsRoundDetails(BaseModel):
     currency: str = Field(default="EUR", pattern=r"^[A-Z]{3}$")
     status: str = Field(default="Reserved", max_length=50)
     caddy_request_status: Optional[str] = Field(default=None, max_length=100)
+    caddy_request: Optional[Dict[str, Any]] = None
 
     @field_validator("price")
     @classmethod

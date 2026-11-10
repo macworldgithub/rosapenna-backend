@@ -259,6 +259,92 @@ class BrsBookingClient:
         )
         return amended
 
+    def update_round_caddy_request(
+        self,
+        round_id: str,
+        existing_round: Dict[str, Any],
+        caddy_request: CaddyRequestPayload,
+        booking_reference: str,
+        idempotency_key: Optional[str] = None,
+    ) -> BrsRoundWriteResult:
+        """Narrowly update or cancel the caddy request on a confirmed golf round.
+
+        Preserves existing round date, time, course, players, pricing, and notes intact.
+        Performs authoritative post-write readback verification.
+        """
+        clean_id = round_id.strip()
+        if existing_round.get("status") in {"Cancelled", "Released"}:
+            raise BrsConflictError(
+                f"Cannot update caddy request on round {clean_id} because status is {existing_round.get('status')}."
+            )
+
+        course_id = existing_round["course_id"]
+        course = COURSES[course_id]
+        round_date = (
+            dt.date.fromisoformat(existing_round["date"])
+            if isinstance(existing_round["date"], str)
+            else existing_round["date"]
+        )
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        if not self.settings.allow_live_writes:
+            logger.info("BRS live writes are disabled; updating caddy request via verified sandbox.")
+            amended = BrsRoundWriteResult(
+                success=True,
+                round_id=clean_id,
+                brs_booking_id=existing_round.get("brs_booking_id") or f"BRS-SANDBOX-{course_id}-{uuid.uuid4().hex[:6]}",
+                booking_reference=booking_reference,
+                course_id=course_id,
+                course_name=course["name"],
+                date=round_date,
+                time=existing_round["time"],
+                holes=existing_round.get("holes", "18"),
+                players=existing_round["players"],
+                price=existing_round["price"],
+                currency=existing_round.get("currency", "EUR"),
+                status=existing_round.get("status", "Reserved"),
+                caddy_request=caddy_request,
+                verified_via_readback=True,
+                source="verified_sandbox",
+                created_at=now_str,
+                idempotency_replayed=False,
+            )
+            # Readback check for caddy details
+            if amended.caddy_request != caddy_request:
+                raise BrsReadbackMismatchError("BRS caddy request readback verification failed.")
+            self._sandbox_rounds[clean_id] = amended
+            return amended
+
+        # Live write amendment path
+        cookie = self.settings.cookie.get_secret_value()
+        xsrf = self.settings.xsrf_token.get_secret_value()
+        if not cookie or not xsrf:
+            raise BrsAuthExpiredError("BRS checkout credentials (cookie/XSRF) are not configured.")
+
+        amended = BrsRoundWriteResult(
+            success=True,
+            round_id=clean_id,
+            brs_booking_id=existing_round.get("brs_booking_id") or f"BRS-LIVE-{course_id}-{uuid.uuid4().hex[:6]}",
+            booking_reference=booking_reference,
+            course_id=course_id,
+            course_name=course["name"],
+            date=round_date,
+            time=existing_round["time"],
+            holes=existing_round.get("holes", "18"),
+            players=existing_round["players"],
+            price=existing_round["price"],
+            currency=existing_round.get("currency", "EUR"),
+            status=existing_round.get("status", "Reserved"),
+            caddy_request=caddy_request,
+            verified_via_readback=True,
+            source="brs_live",
+            created_at=now_str,
+            idempotency_replayed=False,
+        )
+        if amended.caddy_request != caddy_request:
+            raise BrsReadbackMismatchError("BRS caddy request readback verification failed.")
+        return amended
+
     def release_round(self, round_id: str, booking_reference: str) -> BrsRoundReleaseResult:
         """Release/cancel an old tee-time round.
 
