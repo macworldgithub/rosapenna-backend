@@ -335,6 +335,25 @@ def get_revised_confirmation_service(request: Request):
     return service
 
 
+def get_mmb_history_service(request: Request):
+    from rosapenna_backend.services.mmb_history import MmbHistoryService
+    service = getattr(request.app.state, "mmb_history_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        operation_engine = get_booking_operation_engine(request)
+        staff_audit = getattr(request.app.state, "staff_audit_log", None)
+        service = MmbHistoryService(
+            database=db,
+            linkage_service=linkage_svc,
+            operation_engine=operation_engine,
+            staff_audit_log=staff_audit,
+        )
+        request.app.state.mmb_history_service = service
+    return service
+
+
+
 
 
 

@@ -22,12 +22,14 @@ from rosapenna_backend.api.routes import (
     mmb_caddy,
     mmb_contact,
     mmb_gate,
+    mmb_history,
     mmb_occupants,
     mmb_requests,
     packages,
     revised_confirmations,
     rooms,
     staff_operations,
+    staff_recovery,
     staff_requests,
 )
 from rosapenna_backend.config import settings, validate_security_settings
@@ -218,6 +220,8 @@ def create_app() -> FastAPI:
     application.include_router(booking_linkage.router)
     application.include_router(staff_requests.router)
     application.include_router(revised_confirmations.router)
+    application.include_router(mmb_history.router)
+    application.include_router(staff_recovery.router)
     return application
 
 

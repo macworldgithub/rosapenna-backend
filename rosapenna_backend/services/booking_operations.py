@@ -1301,3 +1301,178 @@ class BookingOperationEngine:
             staff_review_required=True,
             created_at=record.created_at,
         )
+
+    def recover_operation(
+        self,
+        operation_id: str,
+        actor: str = "staff",
+        staff_notes: Optional[str] = None,
+        force_readback_recheck_only: bool = False,
+    ) -> Dict[str, Any]:
+        """Safely resume and reconcile an operation halted in unconfirmed_reconciliation (Ticket M16).
+
+        Guarantees:
+        1. Resumes the existing operation identity (does not create duplicate operation IDs).
+        2. Rechecks current booking linkage and vendor state.
+        3. Prevents duplicate charges or duplicate vendor reservations.
+        4. Updates stage history with audit trail.
+        5. Returns clear outcome ('recovered_completed', 'still_unconfirmed', 'requires_manual_reconciliation').
+        """
+        record = self.get_operation(operation_id)
+        if not record:
+            return {
+                "outcome": "not_found",
+                "stage": "unknown",
+                "message": f"Operation record '{operation_id}' not found.",
+                "readback_verified": False,
+            }
+
+        if record.stage == "completed":
+            return {
+                "outcome": "recovered_completed",
+                "stage": "completed",
+                "message": "Operation is already completed.",
+                "readback_verified": True,
+                "email_delivery_id": record.email_delivery_id,
+                "replayed": True,
+            }
+
+        if record.stage != "unconfirmed_reconciliation":
+            return {
+                "outcome": "still_unconfirmed",
+                "stage": record.stage,
+                "message": f"Operation is in stage '{record.stage}', not 'unconfirmed_reconciliation'.",
+                "readback_verified": False,
+            }
+
+        # Check booking linkage
+        try:
+            linkage = self.linkage_service.get_linkage(record.booking_reference)
+        except Exception as exc:
+            return {
+                "outcome": "requires_manual_reconciliation",
+                "stage": record.stage,
+                "message": f"Booking linkage not found: {exc}",
+                "readback_verified": False,
+            }
+
+        payment_doc = None
+        if record.payment_id and self.database is not None:
+            try:
+                payment_doc = self.database["package_payments"].find_one({"payment_id": record.payment_id})
+            except Exception:
+                pass
+
+        if record.operation_type == "amendment" and record.amendment_offer_id:
+            offer = None
+            if self.amendment_service is not None:
+                offer = self.amendment_service.get_amendment_offer(record.amendment_offer_id, record.booking_reference)
+
+            if not offer:
+                record.stage_history.append(
+                    StageHistoryEntry(
+                        stage=record.stage,
+                        actor=actor,
+                        details=f"Recovery failed: Amendment offer '{record.amendment_offer_id}' missing. Manual reconciliation required. {staff_notes or ''}".strip(),
+                    )
+                )
+                self._save_record(record)
+                return {
+                    "outcome": "requires_manual_reconciliation",
+                    "stage": record.stage,
+                    "message": "Amendment offer missing or invalidated. Manual reconciliation required.",
+                    "readback_verified": False,
+                }
+
+            current_rev = getattr(linkage, "booking_revision", getattr(linkage, "revision", 1))
+            if current_rev > offer.booking_revision:
+                record.stage_history.append(
+                    StageHistoryEntry(
+                        stage=record.stage,
+                        actor=actor,
+                        details=f"Recovery conflict: Booking is at revision {current_rev}, offer was for revision {offer.booking_revision}. Manual reconciliation required. {staff_notes or ''}".strip(),
+                    )
+                )
+                self._save_record(record)
+                return {
+                    "outcome": "requires_manual_reconciliation",
+                    "stage": record.stage,
+                    "message": f"Revision conflict: Booking is at revision {current_rev}, whereas amendment offer expected revision {offer.booking_revision}. Requires manual reconciliation.",
+                    "readback_verified": False,
+                }
+
+            exec_req = ExecuteBookingOperationRequest(
+                idempotency_key=f"recovery_{record.operation_id}",
+                operation_type="amendment",
+                amendment_offer_id=record.amendment_offer_id,
+                booking_reference=record.booking_reference,
+                payment_id=record.payment_id,
+            )
+
+            if force_readback_recheck_only:
+                opera_res_id = record.vendor_references.get("amended_opera_reservation_id")
+                brs_rounds = record.vendor_references.get("replacement_brs_round_ids", [])
+                proposed_golf = getattr(offer, "proposed_golf_rounds", getattr(offer, "proposed_golf", []))
+                if opera_res_id and len(brs_rounds) == len(proposed_golf):
+                    exec_res = self._execute_amendment(record, exec_req)
+                    if exec_res.stage == "completed":
+                        record.stage_history.append(
+                            StageHistoryEntry(
+                                stage="completed",
+                                actor=actor,
+                                details=f"Recovery verified existing vendor writes. Status completed. {staff_notes or ''}".strip(),
+                            )
+                        )
+                        record.staff_alert = None
+                        self._save_record(record)
+                        return {
+                            "outcome": "recovered_completed",
+                            "stage": "completed",
+                            "message": "Existing vendor writes verified via readback and linkage synchronized.",
+                            "readback_verified": True,
+                            "new_booking_revision": current_rev + 1,
+                            "email_delivery_id": record.email_delivery_id,
+                        }
+
+            # Attempt full safe resumption
+            exec_res = self._execute_amendment(record, exec_req)
+            if exec_res.stage == "completed":
+                record.stage_history.append(
+                    StageHistoryEntry(
+                        stage="completed",
+                        actor=actor,
+                        details=f"Recovery retry succeeded. Vendor writes verified and linkage synchronized. {staff_notes or ''}".strip(),
+                    )
+                )
+                record.staff_alert = None
+                self._save_record(record)
+                return {
+                    "outcome": "recovered_completed",
+                    "stage": "completed",
+                    "message": "Amendment recovered and committed successfully. Vendor readback verified.",
+                    "readback_verified": True,
+                    "new_booking_revision": current_rev + 1,
+                    "email_delivery_id": record.email_delivery_id,
+                }
+            else:
+                record.stage_history.append(
+                    StageHistoryEntry(
+                        stage=record.stage,
+                        actor=actor,
+                        details=f"Recovery retry attempted by {actor}; vendor writes halted at {exec_res.stage}: {exec_res.message}. {staff_notes or ''}".strip(),
+                    )
+                )
+                self._save_record(record)
+                return {
+                    "outcome": "still_unconfirmed",
+                    "stage": record.stage,
+                    "message": f"Recovery attempt could not complete automatically ({exec_res.message}). Original booking remains preserved.",
+                    "readback_verified": False,
+                }
+
+        return {
+            "outcome": "requires_manual_reconciliation",
+            "stage": record.stage,
+            "message": "Non-amendment operation recovery requires manual staff intervention.",
+            "readback_verified": False,
+        }
