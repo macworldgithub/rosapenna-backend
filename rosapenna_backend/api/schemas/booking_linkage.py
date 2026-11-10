@@ -175,6 +175,7 @@ class BookingLinkageResponse(BaseModel):
     brs_rounds: List[BrsRoundDetails] = Field(default_factory=list)
     payments: List[PaymentLedgerEntry] = Field(default_factory=list)
     financials: Dict[str, Any] = Field(default_factory=dict)
+    pending_requests: List[Dict[str, Any]] = Field(default_factory=list)
     revision: int = 1
     created_at: dt.datetime
     updated_at: dt.datetime
@@ -242,7 +243,17 @@ class GuestPendingRequestSummary(BaseModel):
     request_id: str
     request_type: str
     description: str
-    status: Literal["pending_review", "under_review", "approved", "declined"] = "pending_review"
+    status: Literal[
+        "pending_review",
+        "under_review",
+        "needs_information",
+        "rejected",
+        "approved_awaiting_implementation",
+        "completed",
+        "approved",
+        "declined",
+        "cancelled",
+    ] = "pending_review"
     submitted_at: dt.datetime
     notes: Optional[str] = None
 

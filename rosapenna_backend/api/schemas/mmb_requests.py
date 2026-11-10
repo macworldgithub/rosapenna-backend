@@ -22,6 +22,10 @@ RequestType = Literal["special_request", "cancellation_request"]
 RequestReviewStatus = Literal[
     "pending_review",
     "under_review",
+    "needs_information",
+    "rejected",
+    "approved_awaiting_implementation",
+    "completed",
     "approved",
     "declined",
     "cancelled",

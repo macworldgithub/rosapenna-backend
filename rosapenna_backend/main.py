@@ -27,6 +27,7 @@ from rosapenna_backend.api.routes import (
     packages,
     rooms,
     staff_operations,
+    staff_requests,
 )
 from rosapenna_backend.config import settings, validate_security_settings
 from rosapenna_backend.core.display import start_virtual_display, start_vnc_server, stop_virtual_display, stop_vnc_server
@@ -214,6 +215,7 @@ def create_app() -> FastAPI:
     application.include_router(mmb_requests.router)
     application.include_router(mmb_gate.router)
     application.include_router(booking_linkage.router)
+    application.include_router(staff_requests.router)
     return application
 
 

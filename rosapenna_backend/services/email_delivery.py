@@ -316,6 +316,153 @@ Reservations Team · Rosapenna Hotel & Golf Resort
                 error_message=str(exc),
             )
 
+    def send_staff_outcome_notification(
+        self,
+        booking: Dict[str, Any],
+        request_id: str,
+        request_type: str,
+        outcome_status: str,
+        reason: str,
+        guest_message: Optional[str] = None,
+        idempotency_key: Optional[str] = None,
+    ) -> EmailDeliveryResult:
+        """Send official notification of staff review outcome for special/cancellation request (Ticket M14)."""
+        if idempotency_key and idempotency_key in self._idempotency_records:
+            return self._idempotency_records[idempotency_key].model_copy()
+
+        lead = booking.get("lead_guest") or {}
+        recipient = lead.get("email") or "guest@example.com"
+        ref = booking.get("booking_reference") or booking.get("booking_intent_id", "REF-PENDING")
+        guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Valued Guest"
+
+        safe_guest_name = html.escape(guest_name)
+        safe_ref = html.escape(str(ref))
+        safe_req_id = html.escape(str(request_id))
+        safe_reason = html.escape(reason)
+        safe_guest_message = html.escape(guest_message) if guest_message else None
+
+        if outcome_status == "needs_information":
+            status_title = "Information Needed"
+            subject = f"Information Needed for Request {request_id} — Booking {ref}"
+            explanation = "Our Reservations team requires additional information to proceed with your request."
+        elif outcome_status == "rejected":
+            status_title = "Request Unable to be Fulfilled"
+            subject = f"Update on Request {request_id} — Booking {ref}"
+            explanation = "Following review by our Reservations team, we are unable to fulfill this request."
+        elif outcome_status == "approved_awaiting_implementation":
+            status_title = "Request Approved (Awaiting Implementation)"
+            subject = f"Request Approved — Queued for Implementation — Booking {ref}"
+            explanation = "Your request has been approved by our Reservations team and is queued for reservation implementation."
+        elif outcome_status == "completed":
+            status_title = "Request Completed"
+            subject = f"Request Completed — Booking {ref}"
+            explanation = "Your request has been successfully completed and reflected in your booking arrangements."
+        else:
+            status_title = "Request Update"
+            subject = f"Update on Request {request_id} — Booking {ref}"
+            explanation = f"Your request status has been updated to {outcome_status}."
+
+        delivery_id = f"DEL-STAFF-OUTCOME-{uuid.uuid4().hex[:6]}"
+        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
+
+        guest_msg_html = f'<p><strong>Message from Staff:</strong> {safe_guest_message}</p>' if safe_guest_message else ""
+
+        html_body = f"""
+        <html>
+        <body style="font-family: Arial, sans-serif; line-height: 1.6; color: #1a202c; max-width: 600px; margin: 0 auto; padding: 20px;">
+            <div style="background-color: #1A3323; padding: 15px; text-align: center; border-bottom: 3px solid #DBB155;">
+                <h2 style="color: #ffffff; margin: 0; font-size: 18px;">ROSAPENNA HOTEL & GOLF RESORT</h2>
+            </div>
+            <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none;">
+                <p>Dear {safe_guest_name},</p>
+                <p>We are writing to provide an update on your request (Reference: <b>{safe_req_id}</b>) for Booking <b>{safe_ref}</b>.</p>
+                <div style="background-color: #f8fafc; border-left: 4px solid #DBB155; padding: 12px; margin: 15px 0; color: #334155;">
+                    <p style="margin: 0 0 5px 0;"><strong>Status:</strong> {status_title}</p>
+                    <p style="margin: 0 0 5px 0;">{explanation}</p>
+                    <p style="margin: 0;"><strong>Details / Reason:</strong> {safe_reason}</p>
+                </div>
+                {guest_msg_html}
+                <p>You can review your updated itinerary and request status at any time in the Rosapenna Manage My Booking portal.</p>
+                <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+                <p style="font-size: 12px; color: #64748b;">Rosapenna Reservations Team · reservations@rosapenna.ie</p>
+            </div>
+        </body>
+        </html>
+        """
+
+        plain_body = f"""Dear {guest_name},
+
+We have an update on your request {request_id} for Booking {ref}.
+Status: {status_title}
+{explanation}
+Reason / Details: {reason}
+{f"Staff Message: {guest_message}" if guest_message else ""}
+
+Rosapenna Reservations Team · reservations@rosapenna.ie
+"""
+
+        if not self.settings.allow_live_send:
+            logger.info("Simulating staff request outcome notification dispatch.")
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="staff_request_outcome",
+                recipient=recipient,
+                hotel_notified=True,
+                pdf_attached=False,
+                subject=subject,
+                status="simulated_sandbox",
+                sent_at=now_str,
+            )
+            self._dispatched_emails.append({
+                "delivery_id": delivery_id,
+                "template": "staff_request_outcome",
+                "recipient": recipient,
+                "hotel_copy": self.settings.hotel_reservations_email,
+                "subject": subject,
+                "request_id": request_id,
+                "outcome_status": outcome_status,
+                "html_preview": html_body,
+                "dispatched_at": now_str,
+            })
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+
+        try:
+            self._send_smtp_email(
+                recipient=recipient,
+                subject=subject,
+                html_body=html_body,
+                plain_body=plain_body,
+                cc_recipient=self.settings.hotel_reservations_email,
+            )
+            res = EmailDeliveryResult(
+                success=True,
+                delivery_id=delivery_id,
+                template="staff_request_outcome",
+                recipient=recipient,
+                hotel_notified=True,
+                pdf_attached=False,
+                subject=subject,
+                status="sent",
+                sent_at=now_str,
+            )
+            if idempotency_key:
+                self._idempotency_records[idempotency_key] = res
+            return res
+        except Exception as exc:
+            return EmailDeliveryResult(
+                success=False,
+                delivery_id=delivery_id,
+                template="staff_request_outcome",
+                recipient=recipient,
+                subject=subject,
+                status="failed",
+                sent_at=now_str,
+                error_message=str(exc),
+            )
+
     def send_one_time_code(
         self,
         recipient_email: str,

@@ -876,3 +876,187 @@ class BookingLinkageService:
         updated_doc = self.collection.find_one({"booking_reference": clean_ref})
         assert updated_doc is not None
         return BookingLinkageResponse(**updated_doc)
+
+    def transition_pending_request(
+        self,
+        booking_reference: str,
+        request_id: str,
+        target_status: str,
+        actor: str,
+        reason: str,
+        internal_notes: Optional[str] = None,
+        guest_message: Optional[str] = None,
+        f12_delivery_id: Optional[str] = None,
+        f12_delivery_status: Optional[str] = None,
+        execution_details: Optional[Dict[str, Any]] = None,
+        expected_revision: Optional[int] = None,
+    ) -> BookingLinkageResponse:
+        """Atomically transition the outcome of a guest pending request with immutable history and audit log.
+
+        Enforces:
+        - M14 AC 1: Only authorized staff with actor, timestamp, reason, prior and new status recorded.
+        - M14 AC 2: Distinct persisted outcomes.
+        - M14 AC 6: Matches durable staff outcome.
+        - Concurrency control via expected_revision.
+        """
+        if self.collection is None:
+            raise LinkageNotFoundError("Storage is not configured.")
+
+        clean_ref = booking_reference.strip().upper()
+        clean_req_id = request_id.strip()
+
+        existing = self.collection.find_one({"booking_reference": clean_ref})
+        if not existing:
+            raise LinkageNotFoundError(f"Booking reference '{clean_ref}' not found.")
+
+        current_rev = existing.get("revision", 1)
+        if expected_revision is not None and current_rev != expected_revision:
+            raise LinkageConflictError(
+                f"Booking revision conflict: expected {expected_revision}, current is {current_rev}."
+            )
+
+        # Locate the specific request in pending_requests
+        target_req = None
+        for r in existing.get("pending_requests", []):
+            if r.get("request_id") == clean_req_id:
+                target_req = r
+                break
+
+        if not target_req:
+            raise LinkageNotFoundError(f"Request '{clean_req_id}' not found on booking '{clean_ref}'.")
+
+        prior_status = target_req.get("status", "pending_review")
+        now = _utc_now()
+
+        history_entry = {
+            "history_id": f"hist_{uuid.uuid4().hex[:8]}",
+            "actor": actor,
+            "timestamp": now,
+            "prior_status": prior_status,
+            "new_status": target_status,
+            "reason": reason,
+            "internal_notes": internal_notes,
+            "guest_message": guest_message,
+            "execution_details": execution_details or {},
+            "f12_delivery_id": f12_delivery_id,
+            "f12_delivery_status": f12_delivery_status,
+        }
+
+        audit_entry = LinkageAuditTrailEntry(
+            audit_id=f"aud_{uuid.uuid4().hex[:12]}",
+            actor=actor,
+            action="staff_request_transition",
+            occurred_at=now,
+            reason=f"Transitioned {target_req.get('request_type', 'request')} ({clean_req_id}) from {prior_status} to {target_status}: {reason}",
+            before_state={
+                "request_id": clean_req_id,
+                "status": prior_status,
+                "revision": current_rev,
+            },
+            after_state={
+                "request_id": clean_req_id,
+                "status": target_status,
+                "revision": current_rev + 1,
+            },
+        )
+
+        filter_criteria: Dict[str, Any] = {
+            "booking_reference": clean_ref,
+            "pending_requests.request_id": clean_req_id,
+        }
+        if expected_revision is not None:
+            filter_criteria["revision"] = expected_revision
+
+        existing_history = target_req.get("history") or []
+        updated_history = list(existing_history)
+        updated_history.append(history_entry)
+
+        res = self.collection.update_one(
+            filter_criteria,
+            {
+                "$set": {
+                    "pending_requests.$.status": target_status,
+                    "pending_requests.$.last_updated_at": now,
+                    "pending_requests.$.notes": internal_notes or target_req.get("notes"),
+                    "pending_requests.$.f12_delivery_id": f12_delivery_id or target_req.get("f12_delivery_id"),
+                    "pending_requests.$.f12_delivery_status": f12_delivery_status or target_req.get("f12_delivery_status"),
+                    "pending_requests.$.execution_details": execution_details or target_req.get("execution_details", {}),
+                    "pending_requests.$.history": updated_history,
+                    "updated_at": now,
+                },
+                "$inc": {"revision": 1},
+                "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
+            },
+        )
+
+        if res.matched_count == 0:
+            raise LinkageConflictError("Concurrent booking update detected. Please refresh.")
+
+        updated_doc = self.collection.find_one({"booking_reference": clean_ref})
+        assert updated_doc is not None
+        return BookingLinkageResponse(**updated_doc)
+
+    def update_request_notification_status(
+        self,
+        booking_reference: str,
+        request_id: str,
+        f12_delivery_id: str,
+        f12_delivery_status: str,
+    ) -> None:
+        """Update F12 notification delivery status for a request without modifying revision or vendor state."""
+        if self.collection is None:
+            return
+        clean_ref = booking_reference.strip().upper()
+        clean_req_id = request_id.strip()
+        self.collection.update_one(
+            {
+                "booking_reference": clean_ref,
+                "pending_requests.request_id": clean_req_id,
+            },
+            {
+                "$set": {
+                    "pending_requests.$.f12_delivery_id": f12_delivery_id,
+                    "pending_requests.$.f12_delivery_status": f12_delivery_status,
+                }
+            },
+        )
+
+    def get_all_pending_requests(
+        self,
+        status_filter: Optional[str] = None,
+        request_type_filter: Optional[str] = None,
+        booking_reference: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List requests across booking linkages with optional status/type/booking filtering."""
+        if self.collection is None:
+            return []
+
+        query: Dict[str, Any] = {"pending_requests": {"$exists": True, "$ne": []}}
+        if booking_reference:
+            query["booking_reference"] = booking_reference.strip().upper()
+
+        cursor = self.collection.find(query)
+        results: List[Dict[str, Any]] = []
+        for doc in cursor:
+            ref = doc.get("booking_reference")
+            lead = doc.get("lead_guest") or {}
+            lead_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip()
+            lead_email = lead.get("email")
+
+            for req in doc.get("pending_requests", []):
+                req_status = req.get("status", "pending_review")
+                req_type = req.get("request_type", "general_inquiry")
+
+                if status_filter and req_status != status_filter:
+                    continue
+                if request_type_filter and req_type != request_type_filter:
+                    continue
+
+                item = dict(req)
+                item["booking_reference"] = ref
+                item["lead_guest_name"] = lead_name
+                item["lead_guest_email"] = lead_email
+                item["booking_revision"] = doc.get("revision", 1)
+                results.append(item)
+
+        return results

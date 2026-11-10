@@ -299,5 +299,25 @@ def get_mmb_request_service(request: Request):
     return service
 
 
+def get_staff_request_service(request: Request):
+    from rosapenna_backend.services.staff_requests import StaffRequestService
+    service = getattr(request.app.state, "staff_request_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        linkage_svc = get_booking_linkage_service(request)
+        email_svc = get_email_delivery_service(request)
+        operation_engine = get_booking_operation_engine(request)
+        staff_audit = getattr(request.app.state, "staff_audit_log", None)
+        service = StaffRequestService(
+            database=db,
+            linkage_service=linkage_svc,
+            email_service=email_svc,
+            operation_engine=operation_engine,
+            staff_audit_log=staff_audit,
+        )
+        request.app.state.staff_request_service = service
+    return service
+
+
 
 
