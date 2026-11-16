@@ -1,6 +1,7 @@
 """Application settings and startup security checks."""
 
 import ipaddress
+from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
@@ -60,11 +61,142 @@ class Settings(BaseSettings):
     teesheet_refresh_enabled: bool = True
     intents_collection: str = Field("booking_intents", pattern=r"^[a-z][a-z0-9_]{0,63}$")
 
+    payment_mode: str = Field(
+        default="disabled",
+        validation_alias=AliasChoices("BOOKING_PAYMENT_MODE", "PAYMENT_MODE"),
+    )
+    simulation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_SIMULATION_ENABLED", "SIMULATION_ENABLED"),
+    )
+    simulation_signing_secret: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_SIMULATION_SIGNING_SECRET", "SIMULATION_SIGNING_SECRET"),
+    )
+    simulation_run_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_SIMULATION_RUN_ID", "SIMULATION_RUN_ID"),
+    )
+
+    confirmations_mode: str = Field(
+        default="disabled",
+        validation_alias=AliasChoices("BOOKING_CONFIRMATIONS_MODE", "CONFIRMATIONS_MODE"),
+    )
+    confirmations_test_run_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_CONFIRMATIONS_TEST_RUN_ID", "CONFIRMATIONS_TEST_RUN_ID"),
+    )
+    confirmations_recording_dir: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_CONFIRMATIONS_RECORDING_DIR", "CONFIRMATIONS_RECORDING_DIR"),
+    )
+    confirmations_staff_api_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_CONFIRMATIONS_STAFF_API_ENABLED", "CONFIRMATIONS_STAFF_API_ENABLED"),
+    )
+
+    pre_arrival_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_ENABLED", "PRE_ARRIVAL_ENABLED"),
+    )
+    pre_arrival_mode: str = Field(
+        default="disabled",
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_MODE", "PRE_ARRIVAL_MODE"),
+    )
+    pre_arrival_test_run_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_TEST_RUN_ID", "PRE_ARRIVAL_TEST_RUN_ID"),
+    )
+    pre_arrival_recording_dir: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_RECORDING_DIR", "PRE_ARRIVAL_RECORDING_DIR"),
+    )
+    pre_arrival_policy_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_POLICY_ID", "PRE_ARRIVAL_POLICY_ID"),
+    )
+    pre_arrival_policy_version: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_POLICY_VERSION", "PRE_ARRIVAL_POLICY_VERSION"),
+    )
+    pre_arrival_staff_api_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_STAFF_API_ENABLED", "PRE_ARRIVAL_STAFF_API_ENABLED"),
+    )
+
 def validate_security_settings():
     """Reject unsafe production defaults before serving requests."""
+    import os
+
     environment = settings.environment.strip().lower()
     if environment not in {"development", "test", "staging", "production"}:
         raise RuntimeError("BOOKING_ENVIRONMENT must be development, test, staging, or production")
+
+    payment_mode = settings.payment_mode.strip().lower()
+    if payment_mode not in {"disabled", "simulation"}:
+        raise RuntimeError("BOOKING_PAYMENT_MODE must be 'disabled' or 'simulation'")
+
+    if settings.simulation_enabled != (payment_mode == "simulation"):
+        raise RuntimeError("Simulation requires both payment mode and simulation enablement to agree")
+
+    if settings.simulation_enabled and environment in {"staging", "production"}:
+        raise RuntimeError("BOOKING_SIMULATION_ENABLED cannot be true in staging or production")
+
+    if payment_mode == "simulation" and environment in {"staging", "production"}:
+        raise RuntimeError("Simulation payment mode is forbidden in staging or production")
+
+    confirmations_mode = settings.confirmations_mode.strip().lower()
+    if confirmations_mode not in {"disabled", "recording"}:
+        raise RuntimeError("BOOKING_CONFIRMATIONS_MODE must be 'disabled' or 'recording'")
+
+    if confirmations_mode == "recording" and environment in {"staging", "production"}:
+        raise RuntimeError("Recording confirmations mode is forbidden in staging or production")
+
+    if confirmations_mode == "recording":
+        if environment != "test":
+            raise RuntimeError("Recording confirmations mode is allowed only in test")
+        if not settings.confirmations_test_run_id or len(settings.confirmations_test_run_id) > 100:
+            raise RuntimeError("BOOKING_CONFIRMATIONS_TEST_RUN_ID is required for recording mode")
+        if not settings.confirmations_recording_dir:
+            raise RuntimeError("BOOKING_CONFIRMATIONS_RECORDING_DIR is required for recording mode")
+        recording_path = Path(settings.confirmations_recording_dir).expanduser()
+        if not recording_path.is_absolute() or recording_path.is_symlink():
+            raise RuntimeError("BOOKING_CONFIRMATIONS_RECORDING_DIR must be an absolute non-symlink path")
+        if payment_mode == "simulation" and settings.confirmations_test_run_id != settings.simulation_run_id:
+            raise RuntimeError("N07 and simulated payments must use the same test run ID")
+
+    if settings.confirmations_staff_api_enabled and confirmations_mode != "recording":
+        raise RuntimeError("BOOKING_CONFIRMATIONS_STAFF_API_ENABLED requires confirmations_mode to be 'recording'")
+    if settings.confirmations_staff_api_enabled and environment != "test":
+        raise RuntimeError("N07 staff confirmation routes are allowed only in test")
+
+    pre_arrival_mode = settings.pre_arrival_mode.strip().lower()
+    if pre_arrival_mode not in {"disabled", "recording", "live"}:
+        raise RuntimeError("BOOKING_PRE_ARRIVAL_MODE must be 'disabled', 'recording', or 'live'")
+
+    if pre_arrival_mode == "recording" and environment in {"staging", "production"}:
+        raise RuntimeError("Recording pre-arrival mode is forbidden in staging or production")
+
+    if pre_arrival_mode == "recording":
+        if environment != "test":
+            raise RuntimeError("Recording pre-arrival mode is allowed only in test")
+        if not settings.pre_arrival_test_run_id or len(settings.pre_arrival_test_run_id) > 100:
+            raise RuntimeError("BOOKING_PRE_ARRIVAL_TEST_RUN_ID is required for recording mode")
+        if not settings.pre_arrival_recording_dir:
+            raise RuntimeError("BOOKING_PRE_ARRIVAL_RECORDING_DIR is required for recording mode")
+        pre_rec_path = Path(settings.pre_arrival_recording_dir).expanduser()
+        if not pre_rec_path.is_absolute() or pre_rec_path.is_symlink():
+            raise RuntimeError("BOOKING_PRE_ARRIVAL_RECORDING_DIR must be an absolute non-symlink path")
+
+    if settings.pre_arrival_staff_api_enabled and pre_arrival_mode != "recording":
+        raise RuntimeError("BOOKING_PRE_ARRIVAL_STAFF_API_ENABLED requires pre_arrival_mode to be 'recording'")
+    if settings.pre_arrival_staff_api_enabled and environment != "test":
+        raise RuntimeError("N08 staff pre-arrival routes are allowed only in test")
+
+    for live_flag in ("PROMMT_ALLOW_LIVE_CALLS", "OPERA_ALLOW_LIVE_WRITES", "BRS_ALLOW_LIVE_WRITES", "EMAIL_ALLOW_LIVE_SEND"):
+        if os.getenv(live_flag, "").strip().lower() in {"true", "1", "yes"} and environment in {"development", "test"}:
+            raise RuntimeError(f"{live_flag}=true is strictly forbidden in development or test environments")
+
     origins = [origin.strip() for origin in settings.cors_origins.split(",") if origin.strip()]
     if environment == "production" and any(origin == "*" for origin in origins):
         raise RuntimeError("BOOKING_CORS_ORIGINS must list explicit origins; wildcard CORS is not supported")

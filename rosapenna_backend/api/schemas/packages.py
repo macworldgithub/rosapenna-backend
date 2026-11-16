@@ -348,6 +348,8 @@ class PackagePaymentLinkRequest(BaseModel):
     residence_country: str = Field(default="IE", min_length=2, max_length=10)
     accepted_terms: bool = Field(strict=True)
     special_requests: Optional[str] = Field(default=None, max_length=500)
+    booking_intent_id: Optional[str] = Field(default=None, max_length=100)
+    quote_hash: Optional[str] = Field(default=None, max_length=128)
 
     @field_validator("accepted_terms")
     @classmethod
@@ -369,12 +371,15 @@ class PackagePaymentLinkResponse(BaseModel):
     rules_version: str
     amount: str
     currency: str = "EUR"
-    status: Literal["draft", "unpaid", "pending", "verified_paid", "failed", "expired"]
+    status: Literal["draft", "unpaid", "pending", "verified_paid", "failed", "expired", "cancelled"]
     payment_url: str
     expires_at: str
     reminder_at: str
     reserves_inventory: bool = False
     created_at: str
+    evidence_source: str = "prommt"
+    is_test: bool = False
+    simulation_run_id: Optional[str] = None
 
     @field_validator("amount")
     @classmethod

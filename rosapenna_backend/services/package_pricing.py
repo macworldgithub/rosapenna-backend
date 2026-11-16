@@ -46,6 +46,40 @@ from rosapenna_backend.services.booking_intents import BookingIntentStore, Inten
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
 
+
+def compute_quote_hash(quote: PackageQuoteResponse) -> str:
+    """Hash a canonical serialization of accepted quote facts."""
+    canonical = {
+        "quote_id": quote.quote_id,
+        "rules_version": quote.rules_version,
+        "arrival_date": str(quote.arrival_date),
+        "departure_date": str(quote.departure_date),
+        "total_package_price": f"{Decimal(str(quote.total_package_price)):.2f}",
+        "deposit_amount": f"{Decimal(str(quote.deposit_amount)):.2f}",
+        "currency": quote.currency or "EUR",
+        "rooms": [
+            {
+                "category": r.room_category,
+                "quantity": r.room_quantity,
+                "price": f"{Decimal(str(getattr(r, 'subtotal', getattr(r, 'total_price', '0.00')))):.2f}",
+            }
+            for r in quote.itemized_rooms
+        ],
+        "golf": [
+            {
+                "course_id": g.course_id,
+                "date": str(g.date),
+                "time": g.time,
+                "players": g.players,
+                "price": f"{Decimal(str(getattr(g, 'subtotal', getattr(g, 'total_price', '0.00')))):.2f}",
+            }
+            for g in quote.itemized_golf
+        ],
+    }
+    encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 class PackagePricingService:
     """Calculates live, server-verified package quotes and manages rules configuration."""
 
@@ -57,6 +91,8 @@ class PackagePricingService:
         database: Optional[Database] = None,
         prommt_client: Optional[PrommtClient] = None,
         linkage_service: Optional[BookingLinkageService] = None,
+        payment_simulator: Optional[Any] = None,
+        settings: Optional[Any] = None,
     ):
         self.opera_client = opera_client
         self.teesheet_cache = teesheet_cache
@@ -64,6 +100,8 @@ class PackagePricingService:
         self.db = database
         self.prommt_client = prommt_client or PrommtClient()
         self.linkage_service = linkage_service
+        self.payment_simulator = payment_simulator
+        self.settings = settings
         self.rules_collection = database["package_rules"] if database is not None else None
         self.quotes_collection = database["package_quotes"] if database is not None else None
         self.payments_collection = database["package_payments"] if database is not None else None
@@ -915,12 +953,19 @@ class PackagePricingService:
         return self._cache_and_return_quote(quote_response)
 
     def get_quote(self, quote_id: str) -> Optional[PackageQuoteResponse]:
-        """Retrieve a stored package quote by its ID."""
-        doc = self._quotes_cache.get(quote_id)
-        if not doc and self.quotes_collection is not None:
+        """Retrieve a stored package quote by its ID.
+
+        Durable storage wins over the in-memory cache so that expiry or other
+        persisted quote changes cannot be hidden by a stale cache entry.
+        """
+        doc = None
+        if self.quotes_collection is not None:
             doc = self.quotes_collection.find_one({"quote_id": quote_id})
             if doc:
                 doc.pop("_id", None)
+                self._quotes_cache[quote_id] = doc
+        if not doc:
+            doc = self._quotes_cache.get(quote_id)
         if doc:
             return PackageQuoteResponse.model_validate(doc)
         return None
@@ -954,58 +999,145 @@ class PackagePricingService:
         if not request.accepted_terms:
             raise ValueError("Stay & Play terms and conditions must be explicitly accepted.")
 
-        payment_id = f"pay_{uuid.uuid4().hex}"
-        intent_id = f"bki_{uuid.uuid4().hex}"
-        booking_ref = f"RSP-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+        quote_hash = compute_quote_hash(quote)
+        is_simulation = False
+        if self.settings:
+            payment_mode = getattr(self.settings, "payment_mode", "disabled").strip().lower()
+            simulation_enabled = getattr(self.settings, "simulation_enabled", False) is True
+            environment = getattr(self.settings, "environment", "").strip().lower()
+            if payment_mode not in {"disabled", "simulation"}:
+                raise ValueError("Invalid payment mode.")
+            if simulation_enabled != (payment_mode == "simulation"):
+                raise ValueError("Payment simulation settings are inconsistent.")
+            is_simulation = payment_mode == "simulation" and simulation_enabled
+            if is_simulation and (environment not in {"development", "test"} or self.payment_simulator is None):
+                raise ValueError("Payment simulation is unavailable in this environment.")
+        elif self.payment_simulator is not None:
+            is_simulation = True
 
         # 7-day payment link expiry and 5-day reminder per approved N05 scope
         expires_at = now + dt.timedelta(days=7)
         reminder_at = now + dt.timedelta(days=5)
 
-        # Create scoped Prommt payment request
-        prommt_req = PrommtCreatePaymentRequest(
-            amount=float(quote.deposit_amount),
-            currency="EUR",
-            channel="LINK",
-            payerEmail=request.lead_email,
-            payerFirstName=request.lead_first_name,
-            payerLastName=request.lead_last_name,
-            payerMobile=request.lead_phone,
-            description=f"Stay & Play Deposit for {booking_ref}",
-            externalId=booking_ref,
-            redirectUrl=f"{base_url}/booking/payment?payment_id={payment_id}&ref={booking_ref}",
-            paymentMethods=["CARD"],
-        )
-        prommt_resp = self.prommt_client.create_payment_request(prommt_req)
-        payment_url = prommt_resp.payment_url or self.prommt_client.get_payment_link(prommt_resp.resource_id)
-        if not payment_url:
+        if is_simulation and self.payment_simulator is not None:
+            intent_id = getattr(request, "booking_intent_id", None) or f"bki_{uuid.uuid4().hex}"
+            booking_ref = f"RSP-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+            sim_run_id = getattr(self.settings, "simulation_run_id", None) if self.settings else None
+            env_name = getattr(self.settings, "environment", "development") if self.settings else "development"
+
+            sim_req = self.payment_simulator.create_or_get_payment_request(
+                booking_intent_id=intent_id,
+                booking_reference=booking_ref,
+                quote_id=quote.quote_id,
+                quote_version=1,
+                quote_hash=quote_hash,
+                amount=quote.deposit_amount,
+                currency="EUR",
+                environment=env_name,
+                simulation_run_id=sim_run_id,
+                lead_guest={
+                    "first_name": request.lead_first_name,
+                    "last_name": request.lead_last_name,
+                    "email": request.lead_email,
+                    "phone": request.lead_phone,
+                    "country": request.residence_country,
+                },
+            )
+            payment_id = sim_req.payment_id
             payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
 
-        payment_doc = {
-            "payment_id": payment_id,
-            "prommt_request_id": prommt_resp.resource_id,
-            "booking_intent_id": intent_id,
-            "booking_reference": booking_ref,
-            "quote_id": quote.quote_id,
-            "rules_version": quote.rules_version,
-            "amount": quote.deposit_amount,
-            "currency": "EUR",
-            "provider": "prommt",
-            "status": "unpaid",
-            "lead_guest": {
-                "first_name": request.lead_first_name,
-                "last_name": request.lead_last_name,
-                "email": request.lead_email,
-                "phone": request.lead_phone,
-                "country": request.residence_country,
-            },
-            "special_requests": request.special_requests,
-            "payment_url": payment_url,
-            "expires_at": expires_at.isoformat(),
-            "reminder_at": reminder_at.isoformat(),
-            "reserves_inventory": False,
-            "created_at": now_str,
-        }
+            payment_doc = {
+                "payment_id": payment_id,
+                "prommt_request_id": f"sim_req_{payment_id}",
+                "booking_intent_id": intent_id,
+                "booking_reference": booking_ref,
+                "quote_id": quote.quote_id,
+                "rules_version": quote.rules_version,
+                "quote_hash": quote_hash,
+                "amount": quote.deposit_amount,
+                "currency": "EUR",
+                "provider": "simulation",
+                "purpose": "deposit",
+                "status": sim_req.status,
+                "lead_guest": {
+                    "first_name": request.lead_first_name,
+                    "last_name": request.lead_last_name,
+                    "email": request.lead_email,
+                    "phone": request.lead_phone,
+                    "country": request.residence_country,
+                },
+                "special_requests": request.special_requests,
+                "payment_url": payment_url,
+                "expires_at": expires_at.isoformat(),
+                "reminder_at": reminder_at.isoformat(),
+                "reserves_inventory": False,
+                "created_at": now_str,
+                "evidence_source": "simulation",
+                "is_test": True,
+                "simulation_run_id": sim_run_id,
+            }
+        else:
+            if self.settings is not None:
+                payment_mode = getattr(self.settings, "payment_mode", "disabled")
+                env_name = getattr(self.settings, "environment", "development")
+                if payment_mode == "disabled":
+                    raise ValueError("Payment processing is currently disabled.")
+                if env_name in {"development", "test"}:
+                    raise ValueError("Live payment processing is strictly prohibited in development and test environments.")
+            elif self.prommt_client.settings.allow_live_calls:
+                raise ValueError("Live payment processing is strictly prohibited without configured production authorization.")
+
+            payment_id = f"pay_{uuid.uuid4().hex}"
+            intent_id = f"bki_{uuid.uuid4().hex}"
+            booking_ref = f"RSP-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+
+            # Create scoped Prommt payment request
+            prommt_req = PrommtCreatePaymentRequest(
+                amount=float(quote.deposit_amount),
+                currency="EUR",
+                channel="LINK",
+                payerEmail=request.lead_email,
+                payerFirstName=request.lead_first_name,
+                payerLastName=request.lead_last_name,
+                payerMobile=request.lead_phone,
+                description=f"Stay & Play Deposit for {booking_ref}",
+                externalId=booking_ref,
+                redirectUrl=f"{base_url}/booking/payment?payment_id={payment_id}&ref={booking_ref}",
+                paymentMethods=["CARD"],
+            )
+            prommt_resp = self.prommt_client.create_payment_request(prommt_req)
+            payment_url = prommt_resp.payment_url or self.prommt_client.get_payment_link(prommt_resp.resource_id)
+            if not payment_url:
+                payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
+
+            payment_doc = {
+                "payment_id": payment_id,
+                "prommt_request_id": prommt_resp.resource_id,
+                "booking_intent_id": intent_id,
+                "booking_reference": booking_ref,
+                "quote_id": quote.quote_id,
+                "rules_version": quote.rules_version,
+                "quote_hash": quote_hash,
+                "amount": quote.deposit_amount,
+                "currency": "EUR",
+                "provider": "prommt",
+                "status": "unpaid",
+                "lead_guest": {
+                    "first_name": request.lead_first_name,
+                    "last_name": request.lead_last_name,
+                    "email": request.lead_email,
+                    "phone": request.lead_phone,
+                    "country": request.residence_country,
+                },
+                "special_requests": request.special_requests,
+                "payment_url": payment_url,
+                "expires_at": expires_at.isoformat(),
+                "reminder_at": reminder_at.isoformat(),
+                "reserves_inventory": False,
+                "created_at": now_str,
+                "evidence_source": "prommt",
+                "is_test": False,
+            }
 
         self._payments_cache[payment_id] = payment_doc
         if self.payments_collection is not None:
@@ -1028,6 +1160,38 @@ class PackagePricingService:
             doc = self.payments_collection.find_one({"payment_id": payment_id})
             if doc:
                 doc.pop("_id", None)
+
+        if self.payment_simulator is not None:
+            sim_req = self.payment_simulator.get_payment_request(payment_id)
+            if sim_req:
+                # Never synthesize or promote a different payment from simulator state.
+                if not doc:
+                    return None
+                settings = self.settings
+                if (settings is None
+                        or getattr(settings, "payment_mode", None) != "simulation"
+                        or getattr(settings, "simulation_enabled", False) is not True
+                        or getattr(settings, "environment", None) not in {"development", "test"}
+                        or sim_req.environment != settings.environment
+                        or not getattr(settings, "simulation_run_id", None)
+                        or sim_req.simulation_run_id != settings.simulation_run_id
+                        or doc.get("evidence_source") != "simulation"
+                        or doc.get("is_test") is not True
+                        or doc.get("simulation_run_id") != settings.simulation_run_id):
+                    return doc
+                if sim_req.status != doc.get("status"):
+                    doc["status"] = sim_req.status
+                    doc["transaction_id"] = sim_req.transaction_id
+                    doc["paid_at"] = sim_req.paid_at
+                    doc["failure_reason"] = sim_req.failure_reason
+                    self._payments_cache[payment_id] = doc
+                    if self.payments_collection is not None:
+                        self.payments_collection.update_one(
+                            {"payment_id": payment_id, "evidence_source": "simulation",
+                             "is_test": True, "simulation_run_id": settings.simulation_run_id},
+                            {"$set": doc},
+                        )
+
         if not doc:
             return None
 
@@ -1044,9 +1208,11 @@ class PackagePricingService:
     def process_payment_callback(
         self,
         request: PaymentCallbackRequest,
-        webhook_secret: str = "rosapenna-dev-webhook-secret-key",
+        webhook_secret: Optional[str] = None,
     ) -> dict:
         """Process verified provider payment callback with constant-time HMAC check and replay protection."""
+        if not webhook_secret:
+            raise ValueError("Legacy payment callback is disabled without an explicit test secret")
         # 1. Constant-time HMAC comparison
         payload_bytes = f"{request.payment_id}:{request.transaction_id}:{request.status}:{request.amount}:{request.timestamp}".encode("utf-8")
         computed_sig = hmac.new(webhook_secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()

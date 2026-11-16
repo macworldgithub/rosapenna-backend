@@ -89,38 +89,24 @@ def get_package_payment(
 
 @router.post(
     "/payment-callback",
-    summary="Webhook callback from payment provider with HMAC signature verification",
-    description="Verifies constant-time signature and timestamp replay protection, updating payment state idempotently.",
+    summary="Legacy payment callback (disabled)",
+    description="Disabled until an authorized provider contract and verification flow are implemented.",
 )
 def handle_payment_callback(
     request: PaymentCallbackRequest,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
 ):
-    try:
-        return pricing_service.process_payment_callback(request)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+    raise HTTPException(status_code=503, detail="Legacy payment callback is disabled.")
 @router.post(
     "/prommt/webhook",
-    summary="Webhook callback from Prommt with HMAC-SHA256 signature verification (Ticket F11)",
-    description="Processes Prommt payment events (PAID_SUCCESS, etc.) idempotently with constant-time HMAC-SHA256 check.",
+    summary="Prommt webhook (disabled pending verified contract)",
+    description="Unavailable until the provider verification and payment correlation contract is established.",
 )
 async def handle_prommt_webhook(
     request: Request,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
 ):
-    sig = request.headers.get("X-Signature") or request.headers.get("x-signature")
-    if not sig:
-        raise HTTPException(status_code=400, detail="Missing X-Signature header")
-    body = await request.body()
-    try:
-        return pricing_service.process_prommt_webhook(body, sig)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
+    raise HTTPException(status_code=503, detail="Provider payment webhook is disabled.")
 
 
 @router.post(

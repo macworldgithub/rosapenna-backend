@@ -21,8 +21,19 @@ class ScheduledReminderItem(BaseModel):
     reminder_type: Literal["balance_due_first", "rooming_and_caddy", "concierge_check", "balance_due_final"]
     title: str
     scheduled_date: dt.date
-    target_lead_time_days: int
-    status: Literal["scheduled", "canceled_by_amendment", "suppressed", "dispatched", "failed"] = "scheduled"
+    target_lead_time_days: int = 42
+    status: Literal[
+        "scheduled",
+        "canceled_by_amendment",
+        "suppressed",
+        "dispatched",
+        "failed",
+        "blocked_dependency",
+        "sending",
+        "recorded_test",
+        "submitted",
+        "unknown",
+    ] = "scheduled"
     suppression_reason: Optional[str] = None
     dispatched_at: Optional[str] = None
     delivery_result: Optional[EmailDeliveryResult] = None

@@ -6,7 +6,7 @@ import re
 import uuid
 from datetime import date as Date
 from decimal import Decimal, InvalidOperation
-from typing import Literal
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -229,3 +229,34 @@ class BookingIntentAction(BaseModel):
             if self.payment_payload is None:
                 raise ValueError("record_payment requires payment_payload")
         return self
+
+
+class BookingIntentCommitRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_revision: int = Field(ge=1, strict=True)
+    quote_id: str = Field(min_length=1, max_length=100)
+    quote_hash: Optional[str] = Field(default=None, max_length=128)
+    command_key: Optional[str] = Field(default=None, max_length=100)
+    terms_version: Optional[str] = Field(default="terms-v1-20261014", max_length=100)
+
+
+class BookingIntentReacceptRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    expected_revision: int = Field(ge=1, strict=True)
+    quote_id: str = Field(min_length=1, max_length=100)
+    quote_hash: str = Field(min_length=1, max_length=128)
+    terms_version: str = Field(min_length=1, max_length=100)
+    accepted_terms: bool = Field(strict=True)
+
+    @field_validator("accepted_terms")
+    @classmethod
+    def require_terms(cls, v: bool) -> bool:
+        if not v:
+            raise ValueError("Terms must be explicitly accepted to reaccept offer")
+        return v
+
+
+BookingIntentCommitRequest.model_rebuild()
+BookingIntentReacceptRequest.model_rebuild()

@@ -120,54 +120,10 @@ class BrsBookingClient:
             logger.info("BRS live writes are disabled by policy (BRS_ALLOW_LIVE_WRITES=false); using verified sandbox.")
             return self._create_sandbox_round(request, booking_reference)
 
-        # 2. Live write gate
-        cookie = self.settings.cookie.get_secret_value()
-        xsrf = self.settings.xsrf_token.get_secret_value()
-        if not cookie or not xsrf:
-            raise BrsAuthExpiredError("BRS checkout credentials (cookie/XSRF) are not configured.")
-
-        # Live preparation payload
-        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
-        round_id = request.round_id or f"RND-{request.course_id}-{request.date.strftime('%Y%m%d')}-{request.time.replace(':', '')}-{uuid.uuid4().hex[:6]}"
-        brs_booking_id = f"BRS-LIVE-{request.course_id}-{request.date.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6]}"
-
-        result = BrsRoundWriteResult(
-            success=True,
-            round_id=round_id,
-            brs_booking_id=brs_booking_id,
-            booking_reference=booking_reference,
-            course_id=request.course_id,
-            course_name=course["name"],
-            date=request.date,
-            time=request.time,
-            holes=request.holes,
-            players=request.players,
-            price=request.price,
-            currency=request.currency,
-            status="Reserved",
-            caddy_request=request.caddy_request,
-            verified_via_readback=True,
-            source="brs_live",
-            created_at=now_str,
-            idempotency_replayed=False,
+        # 2. Live write gate: live BRS writes are blocked until authorized vendor contract is established
+        raise BrsProductionPolicyError(
+            "Live BRS booking writes are not permitted: authorized live write API contract is not established."
         )
-
-        # 3. Post-write readback verification
-        self._verify_readback(
-            expected={
-                "course_id": request.course_id,
-                "date": request.date,
-                "time": request.time,
-                "players": request.players,
-            },
-            actual={
-                "course_id": result.course_id,
-                "date": result.date,
-                "time": result.time,
-                "players": result.players,
-            },
-        )
-        return result
 
     def amend_round(
         self,
@@ -226,38 +182,10 @@ class BrsBookingClient:
             self._sandbox_rounds[request.round_id] = amended
             return amended
 
-        # Live write amendment path
-        cookie = self.settings.cookie.get_secret_value()
-        xsrf = self.settings.xsrf_token.get_secret_value()
-        if not cookie or not xsrf:
-            raise BrsAuthExpiredError("BRS checkout credentials (cookie/XSRF) are not configured.")
-
-        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
-        amended = BrsRoundWriteResult(
-            success=True,
-            round_id=request.round_id,
-            brs_booking_id=existing_round.get("brs_booking_id") or f"BRS-LIVE-{course_id}-{uuid.uuid4().hex[:6]}",
-            booking_reference=booking_reference,
-            course_id=course_id,
-            course_name=course["name"],
-            date=new_date,
-            time=new_time,
-            holes=existing_round.get("holes", "18"),
-            players=new_players,
-            price=new_price,
-            currency=existing_round.get("currency", "EUR"),
-            status="Amended",
-            caddy_request=caddy_req,
-            verified_via_readback=True,
-            source="brs_live",
-            created_at=now_str,
-            idempotency_replayed=False,
+        # Live write gate: live BRS writes are blocked until authorized vendor contract is established
+        raise BrsProductionPolicyError(
+            "Live BRS booking writes are not permitted: authorized live write API contract is not established."
         )
-        self._verify_readback(
-            expected={"course_id": course_id, "date": new_date, "time": new_time, "players": new_players},
-            actual={"course_id": amended.course_id, "date": amended.date, "time": amended.time, "players": amended.players},
-        )
-        return amended
 
     def update_round_caddy_request(
         self,
@@ -315,41 +243,20 @@ class BrsBookingClient:
             self._sandbox_rounds[clean_id] = amended
             return amended
 
-        # Live write amendment path
-        cookie = self.settings.cookie.get_secret_value()
-        xsrf = self.settings.xsrf_token.get_secret_value()
-        if not cookie or not xsrf:
-            raise BrsAuthExpiredError("BRS checkout credentials (cookie/XSRF) are not configured.")
-
-        amended = BrsRoundWriteResult(
-            success=True,
-            round_id=clean_id,
-            brs_booking_id=existing_round.get("brs_booking_id") or f"BRS-LIVE-{course_id}-{uuid.uuid4().hex[:6]}",
-            booking_reference=booking_reference,
-            course_id=course_id,
-            course_name=course["name"],
-            date=round_date,
-            time=existing_round["time"],
-            holes=existing_round.get("holes", "18"),
-            players=existing_round["players"],
-            price=existing_round["price"],
-            currency=existing_round.get("currency", "EUR"),
-            status=existing_round.get("status", "Reserved"),
-            caddy_request=caddy_request,
-            verified_via_readback=True,
-            source="brs_live",
-            created_at=now_str,
-            idempotency_replayed=False,
+        # Live write gate: live BRS writes are blocked until authorized vendor contract is established
+        raise BrsProductionPolicyError(
+            "Live BRS booking writes are not permitted: authorized live write API contract is not established."
         )
-        if amended.caddy_request != caddy_request:
-            raise BrsReadbackMismatchError("BRS caddy request readback verification failed.")
-        return amended
 
     def release_round(self, round_id: str, booking_reference: str) -> BrsRoundReleaseResult:
         """Release/cancel an old tee-time round.
 
         Invoked when F14 directs release of a previously replaced tee time.
         """
+        if self.settings.allow_live_writes:
+            raise BrsProductionPolicyError(
+                "Live BRS booking writes are not permitted: authorized live write API contract is not established."
+            )
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
         if round_id in self._sandbox_rounds:
             self._sandbox_rounds[round_id].status = "Released"
@@ -359,7 +266,7 @@ class BrsBookingClient:
             round_id=round_id,
             status="Released",
             released_at=now_str,
-            source="brs_live" if self.settings.allow_live_writes else "verified_sandbox",
+            source="verified_sandbox",
         )
 
     def _verify_readback(self, expected: Dict[str, Any], actual: Dict[str, Any]) -> None:

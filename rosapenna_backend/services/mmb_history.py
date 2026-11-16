@@ -575,26 +575,31 @@ class MmbHistoryService:
                 )
             )
 
-        # 6. Database Pre-arrival Reminders
+        # 6. Database Pre-arrival Reminders (Canonical scheduled_booking_reminders)
         if self.database is not None:
             try:
-                col = self.database["booking_reminders"]
+                col = self.database["scheduled_booking_reminders"]
                 rems = list(col.find({"booking_reference": booking_reference}))
+                if not rems and "booking_reminders" in self.database.list_collection_names():
+                    # Fallback to legacy collection if canonical is empty
+                    rems = list(self.database["booking_reminders"].find({"booking_reference": booking_reference}))
+
                 for r in rems:
                     r_time = _ensure_dt(r.get("created_at") or r.get("scheduled_date"))
-                    cat = "reminder_dispatched" if r.get("status") == "dispatched" else "reminder_scheduled"
-                    supp_note = f"Note: {r.get('suppression_reason')}" if r.get("suppression_reason") else ""
+                    status = r.get("status", "scheduled")
+                    cat = "reminder_dispatched" if status in ("dispatched", "submitted") else "reminder_scheduled"
+                    supp_note = f"Note: {r.get('suppression_reason') or r.get('reason_code')}" if (r.get("suppression_reason") or r.get("reason_code")) else ""
                     events.append(
                         TimelineEvent(
                             event_id=f"EVT-REM-{r.get('reminder_id')}",
                             timestamp=r_time,
                             category=cat,  # type: ignore
                             summary=r.get("title", f"Milestone Reminder: {r.get('reminder_type')}"),
-                            details=f"Scheduled for: {r.get('scheduled_date')}. Status: {r.get('status')}. {supp_note}".strip(),
+                            details=f"Scheduled for: {r.get('scheduled_date')}. Status: {status}. {supp_note}".strip(),
                             booking_revision=r.get("revision_number"),
                             actor_type="system",
                             actor_label="Automated Communications Engine",
-                            status=r.get("status"),
+                            status=status,
                         )
                     )
             except Exception as exc:

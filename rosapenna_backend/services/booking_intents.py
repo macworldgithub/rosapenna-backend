@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
-import uuid
 import hashlib
+import hmac
 import json
+import secrets
+import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 from pymongo import ASCENDING, ReturnDocument
 from pymongo.collection import Collection
@@ -35,11 +38,11 @@ def _utc_now() -> datetime:
 def _event_fingerprint(action: BookingIntentAction) -> str:
     return _fingerprint(action.model_dump(mode="json", exclude={"expected_revision"}))
 
-def public_intent(document: dict) -> dict:
+def public_intent(document: dict, capability_token: Optional[str] = None) -> dict:
     """Return only the supported API contract, never internal hashes or Mongo fields."""
     result = {
         key: value for key, value in document.items()
-        if key not in {"_id", "idempotency_key_hash", "create_fingerprint"}
+        if key not in {"_id", "idempotency_key_hash", "create_fingerprint", "capability_hash"}
     }
     result["booking_intent_id"] = document["_id"]
     result["booking_reference"] = document.get("booking_reference")
@@ -47,6 +50,8 @@ def public_intent(document: dict) -> dict:
         {key: value for key, value in action.items() if key != "request_fingerprint"}
         for action in document.get("actions", [])
     ]
+    if capability_token:
+        result["checkout_capability"] = capability_token
     return result
 
 class BookingIntentStore:

@@ -222,16 +222,12 @@ class RevisedConfirmationService:
         except Exception:
             pass
 
-        # 1. Define milestone schedules relative to arrival date
+        # 1. Define approved N08 milestone schedules relative to arrival date
         # - balance_due_first: strictly 42 days (6 weeks) prior
         # - rooming_and_caddy: 42 days prior (or today if booked within 42 days)
-        # - concierge_check: 14 days prior
-        # - balance_due_final: 5 days prior
         milestones = [
             ("balance_due_first", "Initial Balance Payment Request (6 Weeks Prior)", 42),
             ("rooming_and_caddy", "Rooming List & Caddy Preferences (6 Weeks Prior)", 42),
-            ("concierge_check", "Concierge Welcome & Itinerary Review (14 Days Prior)", 14),
-            ("balance_due_final", "Final Balance Due Notice (5 Days Prior)", 5),
         ]
 
         # 2. Cancel obsolete reminders from prior revisions
@@ -346,6 +342,9 @@ class RevisedConfirmationService:
             for d in docs:
                 sched_d = dt.date.fromisoformat(d["scheduled_date"]) if isinstance(d["scheduled_date"], str) else d["scheduled_date"]
                 del_res = EmailDeliveryResult(**d["delivery_result"]) if d.get("delivery_result") else None
+                target_lead = d.get("target_lead_time_days")
+                if target_lead is None:
+                    target_lead = 42
                 items.append(
                     ScheduledReminderItem(
                         reminder_id=d["reminder_id"],
@@ -354,9 +353,9 @@ class RevisedConfirmationService:
                         reminder_type=d["reminder_type"],
                         title=d["title"],
                         scheduled_date=sched_d,
-                        target_lead_time_days=d["target_lead_time_days"],
+                        target_lead_time_days=target_lead,
                         status=d["status"],
-                        suppression_reason=d.get("suppression_reason"),
+                        suppression_reason=d.get("suppression_reason") or d.get("reason_code"),
                         dispatched_at=d.get("dispatched_at"),
                         delivery_result=del_res,
                         created_at=d.get("created_at", _utc_now()),
@@ -368,6 +367,9 @@ class RevisedConfirmationService:
                 if d["booking_reference"] == clean_ref:
                     sched_d = dt.date.fromisoformat(d["scheduled_date"]) if isinstance(d["scheduled_date"], str) else d["scheduled_date"]
                     del_res = EmailDeliveryResult(**d["delivery_result"]) if d.get("delivery_result") else None
+                    target_lead = d.get("target_lead_time_days")
+                    if target_lead is None:
+                        target_lead = 42
                     items.append(
                         ScheduledReminderItem(
                             reminder_id=d["reminder_id"],
@@ -376,7 +378,7 @@ class RevisedConfirmationService:
                             reminder_type=d["reminder_type"],
                             title=d["title"],
                             scheduled_date=sched_d,
-                            target_lead_time_days=d["target_lead_time_days"],
+                            target_lead_time_days=target_lead,
                             status=d["status"],
                             suppression_reason=d.get("suppression_reason"),
                             dispatched_at=d.get("dispatched_at"),
@@ -386,15 +388,7 @@ class RevisedConfirmationService:
                         )
                     )
 
-        # If empty and booking has an arrival date, schedule baseline milestones
-        if not items and arr_date:
-            items = self.reconcile_and_reschedule_reminders(
-                booking_reference=clean_ref,
-                new_arrival_date=arr_date,
-                new_revision=rev,
-                actor="auto_initializer",
-            )
-
+        # GET is strictly read-only; no job creation on read.
         return ScheduledReminderListResponse(
             booking_reference=clean_ref,
             active_revision=rev,

@@ -30,10 +30,20 @@ router = APIRouter(dependencies=COMMON_DEPS, prefix="/communications", tags=["co
 )
 def send_communication(
     request: SendEmailRequest,
+    response: Response = None,
     store: BookingIntentStore = Depends(get_booking_intent_store),
     email_service: EmailDeliveryService = Depends(get_email_delivery_service),
 ) -> EmailDeliveryResult:
     """Send an email notification according to the requested template."""
+    if response is not None:
+        response.headers["Cache-Control"] = "no-store"
+    if request.template == "booking_confirmation":
+        raise HTTPException(
+            status_code=403,
+            detail="Booking confirmation delivery via legacy communications route is disabled. Use authorized booking operations.",
+            headers={"Cache-Control": "no-store"},
+        )
+
     try:
         booking = store.get_by_reference(request.booking_intent_id)
     except IntentNotFound:
@@ -42,13 +52,6 @@ def send_communication(
     lead = booking.get("lead_guest") or {}
     recipient_email = request.recipient_email or lead.get("email")
     recipient_name = request.recipient_name or f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Guest"
-
-    if request.template == "booking_confirmation":
-        return email_service.send_booking_confirmation(
-            booking=booking,
-            recipient_override=recipient_email,
-            idempotency_key=request.idempotency_key,
-        )
 
     if request.template == "special_request_acknowledgement":
         text = request.special_request_text or "Special request noted."
@@ -122,6 +125,7 @@ def create_special_request(
     summary="Download rendered PDF itinerary document for a booking",
     responses={
         401: {"description": "Missing or invalid API key."},
+        403: {"description": "Unscoped itinerary PDF download via legacy route is disabled."},
         404: {"description": "Booking intent or reference not found."},
         200: {"content": {"application/pdf": {}}, "description": "Binary PDF itinerary document."},
     },
@@ -131,19 +135,8 @@ def download_itinerary_pdf(
     store: BookingIntentStore = Depends(get_booking_intent_store),
 ) -> Response:
     """Compile and stream the authoritative PDF itinerary for a booking."""
-    try:
-        booking = store.get_by_reference(booking_intent_id)
-    except IntentNotFound:
-        raise HTTPException(status_code=404, detail="Booking record was not found") from None
-
-    pdf_bytes = build_itinerary_pdf(booking)
-    ref = booking.get("booking_reference") or booking.get("booking_intent_id", "itinerary")
-
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={
-            "Content-Disposition": f'attachment; filename="Rosapenna-Itinerary-{ref}.pdf"',
-            "Content-Length": str(len(pdf_bytes)),
-        },
+    raise HTTPException(
+        status_code=403,
+        detail="Unscoped itinerary PDF download via legacy route is disabled. Authorized booking or guest session is required.",
+        headers={"Cache-Control": "no-store"},
     )

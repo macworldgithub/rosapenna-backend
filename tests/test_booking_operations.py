@@ -33,6 +33,7 @@ from rosapenna_backend.api.schemas.packages import (
     ItemizedRoomQuote,
     PackageQuoteRequest,
     PackageQuoteResponse,
+    PackageRulesConfig,
 )
 from rosapenna_backend.integrations.brs.booking_client import (
     BrsBookingClient,
@@ -49,7 +50,7 @@ from rosapenna_backend.integrations.opera.client import (
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
 from rosapenna_backend.services.email_delivery import EmailDeliveryService, SmtpSettings
-from rosapenna_backend.services.package_pricing import PackagePricingService
+from rosapenna_backend.services.package_pricing import PackagePricingService, compute_quote_hash
 
 
 class FakeTeesheetCache:
@@ -133,7 +134,7 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.sample_quote = PackageQuoteResponse(
             quote_id="quote_f14_test_001",
             status="available",
-            rules_version="rules-202611-v1",
+            rules_version=PackageRulesConfig().version,
             arrival_date=dt.date(2027, 7, 10),
             departure_date=dt.date(2027, 7, 12),
             nights=2,
@@ -191,6 +192,8 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
             "payment_id": "pay_f14_test_001",
             "booking_reference": "RSP-20270710-F1401",
             "quote_id": self.sample_quote.quote_id,
+            "quote_hash": compute_quote_hash(self.sample_quote),
+            "purpose": "deposit",
             "amount": Decimal("200.00"),
             "currency": "EUR",
             "status": "verified_paid",

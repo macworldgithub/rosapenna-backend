@@ -15,7 +15,7 @@ Enforces:
 from __future__ import annotations
 
 import datetime as dt
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 import hashlib
 from typing import Any, Dict, List, Optional
 import uuid
@@ -51,7 +51,7 @@ from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient, 
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegrationError
 from rosapenna_backend.services.booking_linkage import BookingLinkageService, LinkageConflictError
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
-from rosapenna_backend.services.package_pricing import PackagePricingService
+from rosapenna_backend.services.package_pricing import PackagePricingService, compute_quote_hash
 
 
 def _utc_now_str() -> str:
@@ -117,9 +117,12 @@ class BookingOperationEngine:
 
     def _save_record(self, record: BookingOperationRecord) -> None:
         """Persist or update operation record in database and memory."""
-        doc = record.model_dump(mode="json")
-        self._in_memory_records[record.idempotency_key_hash] = doc
-        self._in_memory_by_id[record.operation_id] = doc
+        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation"})
+        # Keep N07-owned BSON fields out of JSON encoding and preserve them in fixture mirrors.
+        existing = self._in_memory_by_id.get(record.operation_id, {})
+        merged = {**existing, **doc}
+        self._in_memory_records[record.idempotency_key_hash] = merged
+        self._in_memory_by_id[record.operation_id] = merged
 
         if self.collection is not None:
             self.collection.update_one(
@@ -172,6 +175,14 @@ class BookingOperationEngine:
         """Execute or resume a safe booking operation with strict idempotency."""
         key_hash = hash_idempotency_key(request.idempotency_key)
         existing = self._find_record_by_key_hash(key_hash)
+
+        # For new_booking: check if a canonical operation already exists for this booking_reference
+        if existing is None and request.operation_type == "new_booking" and request.booking_reference:
+            ops = self.get_operations_for_booking(request.booking_reference)
+            for op in ops:
+                if op.operation_type == "new_booking":
+                    existing = op
+                    break
 
         # 1. Idempotency Check
         if existing is not None:
@@ -287,6 +298,35 @@ class BookingOperationEngine:
                 created_at=record.created_at,
             )
 
+        # Simulated payment must never authorize real inventory operations.
+        settings = getattr(self.pricing_service, "settings", None)
+        if (payment_doc.get("evidence_source") == "simulation"
+                or payment_doc.get("is_test") is True
+                or getattr(settings, "payment_mode", None) == "simulation"):
+            run_id = getattr(settings, "simulation_run_id", None)
+            environment = getattr(settings, "environment", None)
+            opera_settings = getattr(self.opera_client, "settings", None)
+            brs_settings = getattr(self.brs_client, "settings", None)
+            simulation_safe = (
+                settings is not None
+                and environment in {"development", "test"}
+                and getattr(settings, "payment_mode", None) == "simulation"
+                and getattr(settings, "simulation_enabled", False) is True
+                and bool(run_id)
+                and payment_doc.get("simulation_run_id") == run_id
+                and payment_doc.get("evidence_source") == "simulation"
+                and payment_doc.get("is_test") is True
+                and getattr(opera_settings, "allow_live_writes", None) is False
+                and getattr(brs_settings, "allow_live_writes", None) is False
+            )
+            if not simulation_safe:
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="simulation_safety",
+                    reason="Test payment cannot authorize this booking configuration.",
+                    payment_doc=payment_doc,
+                )
+
         # Payment verified! Advance stage
         record.payment_verified = True
         record.booking_reference = payment_doc.get("booking_reference") or record.booking_reference
@@ -321,6 +361,28 @@ class BookingOperationEngine:
                 payment_doc=payment_doc,
             )
 
+        # A paid deposit is usable only for the exact quote and amount it covers.
+        try:
+            exact_amount = Decimal(str(payment_doc.get("amount"))) == Decimal(str(quote.deposit_amount))
+        except (InvalidOperation, ValueError, TypeError):
+            exact_amount = False
+        exact_payment = (
+            payment_doc.get("quote_id") == quote.quote_id
+            and bool(payment_doc.get("quote_hash"))
+            and payment_doc.get("quote_hash") == compute_quote_hash(quote)
+            and payment_doc.get("currency") == quote.currency
+            and (payment_doc.get("purpose") or payment_doc.get("payment_type")) == "deposit"
+            and exact_amount
+            and (not request.booking_reference or request.booking_reference == payment_doc.get("booking_reference"))
+        )
+        if not exact_payment:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="payment_quote_binding",
+                reason="Deposit does not match the requested quote or booking.",
+                payment_doc=payment_doc,
+            )
+
         record.quote_id = quote.quote_id
         record.quote_version = quote.rules_version
 
@@ -352,10 +414,28 @@ class BookingOperationEngine:
         # Step 3: Write Opera Hotel Reservation (Ticket F08)
         # -------------------------------------------------------------
         lead_guest = payment_doc.get("lead_guest") or {}
-        first_name = lead_guest.get("first_name") or "Guest"
-        last_name = lead_guest.get("last_name") or "Primary"
-        email = lead_guest.get("email") or "guest@example.com"
-        phone = lead_guest.get("phone") or "+3531234567"
+        first_name = (lead_guest.get("first_name") or "").strip()
+        last_name = (lead_guest.get("last_name") or "").strip()
+        email = (lead_guest.get("email") or "").strip()
+        phone = (lead_guest.get("phone") or "").strip()
+
+        if not first_name or not last_name or not email or not phone:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="lead_guest_validation",
+                reason="Lead guest contact details (first_name, last_name, email, phone) are incomplete or missing.",
+                payment_doc=payment_doc,
+            )
+
+        room_items = getattr(quote, "itemized_rooms", [])
+        total_rooms_requested = sum(r.room_quantity for r in room_items) if room_items else 1
+        if total_rooms_requested > 1:
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="topology_validation",
+                reason=f"Multi-room topology ({total_rooms_requested} rooms requested) is not supported in automated single reservation write.",
+                payment_doc=payment_doc,
+            )
 
         opera_res_id = record.vendor_references.get("opera_reservation_id")
         opera_conf_num = record.vendor_references.get("opera_confirmation_number")
@@ -369,6 +449,12 @@ class BookingOperationEngine:
             quote.itemized_rooms[0].rate_plan_code
             if getattr(quote, "itemized_rooms", None)
             else getattr(quote, "package_id", "STAY_PLAY")
+        )
+        hotel_subtotal = (
+            str(quote.total_rooms_price)
+            if hasattr(quote, "total_rooms_price")
+            else str(quote.itemized_rooms[0].subtotal) if getattr(quote, "itemized_rooms", None)
+            else "0.00"
         )
         total_price = (
             str(quote.total_package_price)
@@ -518,13 +604,14 @@ class BookingOperationEngine:
                     departure_date=quote.departure_date,
                     room_category=room_category,
                     occupant_names=[f"{first_name} {last_name}"],
-                    total_amount=total_price,
+                    total_amount=hotel_subtotal,
                     currency="EUR",
                     status="Reserved",
                 ),
                 brs_rounds=[
                     BrsRoundDetails(
                         round_id=rnd_id,
+                        brs_booking_id=brs_booking_id,
                         course_id=r.course_id,
                         course_name=r.course_name,
                         date=r.date,
@@ -534,7 +621,7 @@ class BookingOperationEngine:
                         price=format(Decimal(str(getattr(r, "price", None) or getattr(r, "rate_per_player", "75.00"))).quantize(Decimal("0.01")), ".2f"),
                         status="Reserved",
                     )
-                    for rnd_id, r in zip(existing_round_ids, golf_rounds)
+                    for rnd_id, brs_booking_id, r in zip(existing_round_ids, existing_brs_bk_ids, golf_rounds)
                 ],
                 lead_guest=LeadGuestContact(
                     first_name=first_name,
@@ -559,7 +646,15 @@ class BookingOperationEngine:
             # F14 Safe Operation Engine establishes authoritative linkage
             self.linkage_service.link_booking(link_req, actor="safe_booking_operation_engine")
         except Exception as exc:
-            logger.warning("Linkage creation notice for %s: %s", record.booking_reference, exc)
+            logger.error("Authoritative linkage failed for %s: %s", record.booking_reference, exc)
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="linkage",
+                reason=f"Authoritative booking linkage failed: {exc}",
+                payment_doc=payment_doc,
+                opera_res_id=opera_res_id,
+                brs_round_ids=existing_round_ids,
+            )
 
         # -------------------------------------------------------------
         # Step 6: Send Formal Confirmation Email and Itinerary PDF (F12)
@@ -1117,22 +1212,23 @@ class BookingOperationEngine:
         except Exception as exc:
             logger.warning("Amendment email delivery notice: %s", exc)
 
-        # Reconcile pre-arrival reminders for new arrival date and revision
+        # Reconcile pre-arrival reminders for new arrival date and revision (Ticket N08)
         try:
-            from rosapenna_backend.services.revised_confirmations import RevisedConfirmationService
-            rem_svc = RevisedConfirmationService(
-                database=self.database,
-                linkage_service=self.linkage_service,
-                email_service=self.email_service,
-            )
-            rem_svc.reconcile_and_reschedule_reminders(
+            from rosapenna_backend.services.pre_arrival import PreArrivalService
+            pre_svc = PreArrivalService(database=self.database)
+            pol = None
+            try:
+                pol = pre_svc.get_policy()
+            except Exception:
+                pol = None
+            pre_svc.reconcile_booking(
                 booking_reference=record.booking_reference,
-                new_arrival_date=proposed_stay.arrival_date,
-                new_revision=new_rev,
+                expected_revision=new_rev,
                 actor=f"amendment_commit_{record.operation_id}",
+                policy=pol,
             )
         except Exception as exc:
-            logger.warning("Notice updating reminder schedule for %s: %s", record.booking_reference, exc)
+            logger.warning("Notice updating pre-arrival reminder schedule for %s: %s", record.booking_reference, exc)
 
         # ---------------------------------------------------------------------
         # Step 7: Mark Offer Committed & Complete Operation Record
@@ -1198,6 +1294,8 @@ class BookingOperationEngine:
         )
         # 1. Opera Room Availability Check
         try:
+            room_items = getattr(quote, "itemized_rooms", [])
+            total_rooms = sum(r.room_quantity for r in room_items) if room_items else 1
             guests_count = getattr(quote, "players", 2)
             room_avail = self.opera_client.get_room_availability(
                 arrival_date=quote.arrival_date,
@@ -1208,10 +1306,10 @@ class BookingOperationEngine:
             room_matches = [
                 r for r in categories
                 if (getattr(r, "room_category", None) == room_category or getattr(r, "category_code", None) == room_category)
-                and (getattr(r, "available_rooms", None) or getattr(r, "rooms_available", 0)) >= 1
+                and (getattr(r, "available_rooms", None) or getattr(r, "rooms_available", 0)) >= total_rooms
             ]
             if not room_matches:
-                return False, f"Room category {room_category} is no longer available for requested stay dates."
+                return False, f"Room category {room_category} is no longer available for requested stay dates ({total_rooms} rooms requested)."
         except Exception as exc:
             return False, f"Opera room availability recheck error: {exc}"
 
@@ -1228,7 +1326,7 @@ class BookingOperationEngine:
                 for t in times:
                     if t.get("time") == round_spec.time:
                         slots = t.get("slots", {})
-                        avail = sum(1 for status in slots.values() if status in ("AVAILABLE", "RESERVED_ONLINE"))
+                        avail = sum(1 for status in slots.values() if status == "AVAILABLE")
                         if avail >= round_spec.players:
                             matching_slot = t
                             break
@@ -1246,7 +1344,7 @@ class BookingOperationEngine:
             return False, "Quote has expired (TTL exceeded). Please recalculate package price."
         current_rules = self.pricing_service.get_rules()
         if quote.rules_version != current_rules.version:
-            logger.info("Quote rules version %s differs from current %s", quote.rules_version, current_rules.version)
+            return False, "Booking rules changed after the quote was accepted. A new offer is required."
 
         return True, None
 

@@ -202,7 +202,9 @@ class PrommtIntegrationTests(unittest.TestCase):
         self.assertEqual(resp.amount, "310.00")
         self.assertEqual(resp.currency, "EUR")
         self.assertEqual(resp.status, "unpaid")
-        self.assertTrue(resp.payment_url.startswith("https://pay.prommt.com/link/"))
+        # N06 safety boundary: no simulated or sandbox link may point at a public provider host.
+        self.assertTrue(resp.payment_url.startswith("/dev/payments/"))
+        self.assertNotIn("prommt.com", resp.payment_url)
 
         # Verify payment doc cached with Prommt request ID
         stored = pricing_service.get_payment(resp.payment_id)

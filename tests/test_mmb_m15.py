@@ -113,6 +113,12 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
             source_channel="online",
         )
         self.linkage_service.link_booking(link_req, actor="test_m15_setup")
+        self.revised_service.reconcile_and_reschedule_reminders(
+            booking_reference=self.booking_ref,
+            new_arrival_date=self.opera_stay.arrival_date,
+            new_revision=1,
+            actor="test_m15_setup",
+        )
 
     def test_canonical_booking_snapshot_unifies_42_day_balance_due(self):
         """AC 1 & AC 3: Canonical snapshot computes strictly 42-day balance due date."""
@@ -172,15 +178,14 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
         reminders_resp = self.revised_service.get_scheduled_reminders(self.booking_ref)
         self.assertEqual(reminders_resp.booking_reference, self.booking_ref)
         self.assertEqual(reminders_resp.active_revision, 1)
-        self.assertEqual(len(reminders_resp.reminders), 4)
+        self.assertEqual(len(reminders_resp.reminders), 2)
 
         # Check milestones: 42 days prior is 2027-06-29
         types_map = {r.reminder_type: r for r in reminders_resp.reminders}
         self.assertIn("balance_due_first", types_map)
+        self.assertIn("rooming_and_caddy", types_map)
         self.assertEqual(types_map["balance_due_first"].scheduled_date, dt.date(2027, 6, 29))
         self.assertEqual(types_map["rooming_and_caddy"].scheduled_date, dt.date(2027, 6, 29))
-        self.assertEqual(types_map["concierge_check"].scheduled_date, dt.date(2027, 7, 27))  # 14 days prior
-        self.assertEqual(types_map["balance_due_final"].scheduled_date, dt.date(2027, 8, 5))   # 5 days prior
 
         # Now simulate an amendment commit changing arrival date to 2027-09-10 (Revision 2)
         new_arrival = dt.date(2027, 9, 10)
@@ -190,7 +195,7 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
             new_revision=2,
             actor="test_amendment_commit",
         )
-        self.assertEqual(len(reconciled), 4)
+        self.assertEqual(len(reconciled), 2)
         new_balance_date = new_arrival - dt.timedelta(days=42)  # 2027-07-30
         self.assertEqual(reconciled[0].scheduled_date, new_balance_date)
 
@@ -235,10 +240,13 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
             },
         )
 
-        final_bal_rem = next(r for r in reminders_resp.reminders if r.reminder_type == "balance_due_final")
+        self.revised_service.collection.update_one(
+            {"reminder_id": bal_rem.reminder_id},
+            {"$set": {"status": "scheduled"}},
+        )
         dispatch_bal_paid = self.revised_service.dispatch_reminder(
             booking_reference=self.booking_ref,
-            reminder_id=final_bal_rem.reminder_id,
+            reminder_id=bal_rem.reminder_id,
         )
         self.assertEqual(dispatch_bal_paid.status, "suppressed")
         self.assertIn("Remaining balance is zero", dispatch_bal_paid.message)
@@ -292,20 +300,48 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
             _authorized_session=session,
         )
         self.assertEqual(rems.booking_reference, self.booking_ref)
-        self.assertGreaterEqual(len(rems.reminders), 4)
+        self.assertGreaterEqual(len(rems.reminders), 2)
 
-        # 5. Call dispatch_booking_reminder route handler directly
+        # 5. Call dispatch_booking_reminder route handler directly (must be denied with 403)
         first_rem = rems.reminders[0]
         disp_req = DispatchReminderRequest(idempotency_key="disp_route_test")
-        disp_res = dispatch_booking_reminder(
-            payload=disp_req,
-            booking_reference=self.booking_ref,
-            reminder_id=first_rem.reminder_id,
-            service=self.revised_service,
-            _authorized_session=session,
-            idempotency_key=None,
-        )
-        self.assertIn(disp_res.status, ("dispatched", "suppressed"))
+        with self.assertRaises(HTTPException) as cm:
+            dispatch_booking_reminder(
+                payload=disp_req,
+                booking_reference=self.booking_ref,
+                reminder_id=first_rem.reminder_id,
+                service=self.revised_service,
+                _authorized_session=session,
+                idempotency_key=None,
+            )
+        self.assertEqual(cm.exception.status_code, 403)
+        self.assertIn("Guest reminder dispatch is disabled", cm.exception.detail)
+
+    def test_m15_reads_v2_n08_row_cleanly(self):
+        """R8: Ensure M15 get_scheduled_reminders reads schema_version 2 N08 rows without KeyError."""
+        v2_doc = {
+            "schema_version": 2,
+            "reminder_id": f"REM-N08-{self.booking_ref}-balance_due_first-R1",
+            "booking_reference": self.booking_ref,
+            "revision_number": 1,
+            "reminder_type": "balance_due_first",
+            "title": "Initial Balance Payment Request (42 Days Prior)",
+            "scheduled_date": "2027-06-29",
+            "due_at": dt.datetime(2027, 6, 29, 8, 0, tzinfo=dt.timezone.utc),
+            "status": "scheduled",
+            "attempt_count": 0,
+            "created_at": dt.datetime.now(dt.timezone.utc),
+            "updated_at": dt.datetime.now(dt.timezone.utc),
+        }
+        self.db["scheduled_booking_reminders"].delete_many({"booking_reference": self.booking_ref})
+        self.db["scheduled_booking_reminders"].insert_one(v2_doc)
+
+        resp = self.revised_service.get_scheduled_reminders(self.booking_ref)
+        self.assertEqual(resp.booking_reference, self.booking_ref)
+        self.assertEqual(len(resp.reminders), 1)
+        item = resp.reminders[0]
+        self.assertEqual(item.reminder_id, v2_doc["reminder_id"])
+        self.assertEqual(item.target_lead_time_days, 42)
 
 
 if __name__ == "__main__":

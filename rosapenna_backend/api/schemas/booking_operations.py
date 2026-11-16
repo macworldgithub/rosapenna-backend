@@ -92,6 +92,8 @@ class BookingOperationRecord(BaseModel):
     readback_evidence: Optional[ReadbackEvidence] = None
     staff_alert: Optional[StaffReconciliationAlert] = None
     email_delivery_id: Optional[str] = None
+    confirmed_event: Optional[Dict[str, Any]] = None
+    confirmation: Optional[Dict[str, Any]] = None
     created_at: str = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
     updated_at: str = Field(default_factory=lambda: dt.datetime.now(dt.timezone.utc).isoformat())
     completed_at: Optional[str] = None

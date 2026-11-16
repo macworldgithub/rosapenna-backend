@@ -76,11 +76,20 @@ class PrommtClient:
         to prevent hitting the live Prommt production account.
         """
         # Strict protection: do not make real HTTP calls if live calls are not explicitly enabled
+        import os
+        from rosapenna_backend.config import settings as app_settings
+
+        env_name = getattr(app_settings, "environment", "development").strip().lower()
+        if self.settings.allow_live_calls:
+            if env_name in {"development", "test"} or os.getenv("PROMMT_ALLOW_LIVE_CALLS", "").strip().lower() in {"false", "0", "no", ""}:
+                raise PrommtError("Live outbound Prommt calls are strictly forbidden in development or test environment profiles.", status_code=403)
+
         if not self.settings.allow_live_calls:
             resource_id = f"pmt_req_{uuid.uuid4().hex[:12]}"
-            payment_url = f"https://pay.prommt.com/link/{resource_id}"
+            # Must point to local route, never public pay.prommt.com
+            payment_url = f"/dev/payments/{resource_id}"
             logger.info(
-                "Prommt live calls disabled (PROMMT_ALLOW_LIVE_CALLS=false); returning sandbox payment request %s",
+                "Prommt live calls disabled; returning safe local sandbox payment request %s",
                 resource_id,
             )
             return PrommtPaymentRequestResponse(
@@ -90,7 +99,7 @@ class PrommtClient:
                 url=payment_url,
             )
 
-        # Real live call path (only if user explicitly enables allow_live_calls)
+        # Real live call path (only if user explicitly enables allow_live_calls and environment permits)
         url = f"{self.settings.base_url.rstrip('/')}/paymentrequests"
         payload_dict = request.model_dump(by_alias=True, exclude_none=True)
         if self.settings.location_id and "locationId" not in payload_dict:
@@ -125,7 +134,14 @@ class PrommtClient:
     def get_payment_link(self, payment_request_id: str) -> str:
         """Get the payment link URL for a given payment request ID."""
         if not self.settings.allow_live_calls:
-            return f"https://pay.prommt.com/link/{payment_request_id}"
+            return f"/dev/payments/{payment_request_id}"
+
+        import os
+        from rosapenna_backend.config import settings as app_settings
+
+        env_name = getattr(app_settings, "environment", "development").strip().lower()
+        if env_name in {"development", "test"} or os.getenv("PROMMT_ALLOW_LIVE_CALLS", "").strip().lower() in {"false", "0", "no", ""}:
+            raise PrommtError("Live outbound Prommt calls are strictly forbidden in development or test environment profiles.", status_code=403)
 
         url = f"{self.settings.base_url.rstrip('/')}/paymentrequests/{urllib.parse.quote(payment_request_id)}/link"
         req = urllib.request.Request(
@@ -154,6 +170,13 @@ class PrommtClient:
                 currency="EUR",
                 channel="LINK",
             )
+
+        import os
+        from rosapenna_backend.config import settings as app_settings
+
+        env_name = getattr(app_settings, "environment", "development").strip().lower()
+        if env_name in {"development", "test"} or os.getenv("PROMMT_ALLOW_LIVE_CALLS", "").strip().lower() in {"false", "0", "no", ""}:
+            raise PrommtError("Live outbound Prommt calls are strictly forbidden in development or test environment profiles.", status_code=403)
 
         url = f"{self.settings.base_url.rstrip('/')}/paymentrequests/{urllib.parse.quote(payment_request_id)}"
         req = urllib.request.Request(

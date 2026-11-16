@@ -68,6 +68,18 @@ def get_brs_booking_client(request: Request) -> BrsBookingClient:
     return client
 
 
+def get_payment_simulator(request: Request):
+    from rosapenna_backend.integrations.payments.simulation import PaymentSimulator
+    simulator = getattr(request.app.state, "payment_simulator", None)
+    if simulator is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        settings = getattr(request.app.state, "settings", None)
+        secret = getattr(settings, "simulation_signing_secret", None)
+        simulator = PaymentSimulator(database=db, default_secret=secret)
+        request.app.state.payment_simulator = simulator
+    return simulator
+
+
 def get_prommt_client(request: Request) -> PrommtClient:
     client = getattr(request.app.state, "prommt_client", None)
     if client is None:
@@ -85,6 +97,8 @@ def get_package_pricing_service(request: Request) -> PackagePricingService:
         db = getattr(request.app.state, "mongo_database", None)
         prommt_client = get_prommt_client(request)
         linkage_service = get_booking_linkage_service(request)
+        payment_simulator = get_payment_simulator(request)
+        settings = getattr(request.app.state, "settings", None)
         service = PackagePricingService(
             opera_client=opera_client,
             teesheet_cache=teesheet_cache,
@@ -92,6 +106,8 @@ def get_package_pricing_service(request: Request) -> PackagePricingService:
             database=db,
             prommt_client=prommt_client,
             linkage_service=linkage_service,
+            payment_simulator=payment_simulator,
+            settings=settings,
         )
         request.app.state.package_pricing_service = service
     return service
@@ -353,7 +369,69 @@ def get_mmb_history_service(request: Request):
     return service
 
 
+def get_confirmation_coordinator(request: Request):
+    """Factory dependency for Ticket N07 BookingConfirmationCoordinator."""
+    from rosapenna_backend.services.booking_confirmations import BookingConfirmationCoordinator
+    from rosapenna_backend.services.email_delivery import (
+        DisabledConfirmationTransport,
+        RecordingConfirmationTransport,
+    )
+    from rosapenna_backend.services.booking_confirmations import ConfirmationRuntimeContext
+    from rosapenna_backend.config import settings as default_settings
+    coordinator = getattr(request.app.state, "confirmation_coordinator", None)
+    if coordinator is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        app_settings = getattr(request.app.state, "settings", None) or default_settings
+        mode = getattr(app_settings, "confirmations_mode", "disabled").strip().lower()
+        if mode == "recording":
+            recording_dir = getattr(app_settings, "confirmations_recording_dir", None)
+            run_id = getattr(app_settings, "confirmations_test_run_id", None)
+            if db is None or not recording_dir or not run_id:
+                raise RuntimeError("N07 recording needs durable storage, a test run ID, and an explicit recording directory")
+            transport = RecordingConfirmationTransport(recording_dir=recording_dir)
+        else:
+            transport = DisabledConfirmationTransport()
+        coordinator = BookingConfirmationCoordinator(
+            database=db,
+            transport=transport,
+            runtime_context=ConfirmationRuntimeContext(
+                mode=mode,
+                environment=getattr(app_settings, "environment", "development").strip().lower(),
+                run_id=getattr(app_settings, "confirmations_test_run_id", None),
+                recording_dir=getattr(app_settings, "confirmations_recording_dir", None),
+            ),
+        )
+        request.app.state.confirmation_coordinator = coordinator
+    return coordinator
 
 
-
-
+def get_pre_arrival_service(request: Request):
+    """Factory dependency for Ticket N08 PreArrivalService."""
+    from rosapenna_backend.services.pre_arrival import PreArrivalService
+    from rosapenna_backend.services.email_delivery import (
+        DisabledConfirmationTransport,
+        RecordingConfirmationTransport,
+    )
+    from rosapenna_backend.config import settings as default_settings
+    service = getattr(request.app.state, "pre_arrival_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        app_settings = getattr(request.app.state, "settings", None) or default_settings
+        mode = getattr(app_settings, "pre_arrival_mode", "disabled").strip().lower()
+        if mode == "recording":
+            recording_dir = getattr(app_settings, "pre_arrival_recording_dir", None)
+            run_id = getattr(app_settings, "pre_arrival_test_run_id", None)
+            if db is None or not recording_dir or not run_id:
+                raise RuntimeError("N08 recording needs durable storage, a test run ID, and an explicit recording directory")
+            transport = RecordingConfirmationTransport(recording_dir=recording_dir)
+        else:
+            transport = DisabledConfirmationTransport()
+        service = PreArrivalService(
+            database=db,
+            transport=transport,
+            environment=getattr(app_settings, "environment", "test").strip().lower(),
+            test_run_id=getattr(app_settings, "pre_arrival_test_run_id", None),
+            mmb_enabled=getattr(app_settings, "mmb_enabled", False),
+        )
+        request.app.state.pre_arrival_service = service
+    return service

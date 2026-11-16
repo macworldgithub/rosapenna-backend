@@ -18,6 +18,7 @@ class StaffPrincipal:
     issuer: str
     subject: str
     roles: frozenset[str]
+    scopes: frozenset[str] = frozenset()
 
 
 def require_staff_roles(*required_roles: str):
@@ -39,10 +40,18 @@ def require_staff_roles(*required_roles: str):
             )
 
         if not settings.staff_api_key:
-            raise HTTPException(status_code=503, detail="Staff authentication is not configured")
+            raise HTTPException(
+                status_code=503,
+                detail="Staff authentication is not configured",
+                headers={"Cache-Control": "no-store"},
+            )
 
         if not x_staff_token or not hmac.compare_digest(x_staff_token, settings.staff_api_key):
-            raise HTTPException(status_code=401, detail="Missing or invalid X-Staff-Token header")
+            raise HTTPException(
+                status_code=401,
+                detail="Missing or invalid X-Staff-Token header",
+                headers={"Cache-Control": "no-store"},
+            )
 
         return StaffPrincipal(
             issuer="rosapenna_staff_auth",

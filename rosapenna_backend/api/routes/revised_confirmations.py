@@ -114,7 +114,7 @@ def get_booking_reminders(
 @router.post(
     "/{booking_reference}/reminders/{reminder_id}/dispatch",
     response_model=DispatchReminderResponse,
-    summary="Truthfully evaluate and dispatch a due pre-arrival reminder (Ticket M15)",
+    summary="Guest dispatch disabled; pre-arrival communication is managed durably by server scheduler (Ticket N08)",
 )
 def dispatch_booking_reminder(
     payload: DispatchReminderRequest,
@@ -124,13 +124,8 @@ def dispatch_booking_reminder(
     _authorized_session: Any = Depends(require_guest_booking_scope),
     idempotency_key: Optional[str] = Header(None, alias="X-Idempotency-Key"),
 ) -> DispatchReminderResponse:
-    """Evaluate booking state and dispatch pre-arrival reminder, or suppress if conditions no longer apply."""
-    idemp = payload.idempotency_key or idempotency_key
-    try:
-        return service.dispatch_reminder(
-            booking_reference=booking_reference,
-            reminder_id=reminder_id,
-            idempotency_key=idemp,
-        )
-    except LinkageNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from None
+    """Deny guest dispatch mutation. Pre-arrival communication is managed by server scheduler."""
+    raise HTTPException(
+        status_code=403,
+        detail="Guest reminder dispatch is disabled. Pre-arrival communication is managed durably by the server scheduler; staff recovery routes are available under /staff/pre-arrival.",
+    )

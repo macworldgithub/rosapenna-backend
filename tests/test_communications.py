@@ -1,11 +1,13 @@
 """Unit tests for Ticket F12: Email and itinerary delivery, PDF generation, and communications routes."""
 
 import datetime as dt
+import ssl
 import unittest
 import uuid
 from unittest.mock import MagicMock, patch
 
 from mongomock import MongoClient
+from fastapi import HTTPException
 from pydantic import SecretStr
 
 from rosapenna_backend.api.routes.communications import (
@@ -185,6 +187,7 @@ class EmailDeliveryServiceTests(unittest.TestCase):
     @patch("smtplib.SMTP_SSL")
     def test_live_smtp_dispatch_ssl(self, mock_smtp_ssl_cls):
         mock_server = MagicMock()
+        mock_server.send_message.return_value = {}
         mock_smtp_ssl_cls.return_value.__enter__.return_value = mock_server
 
         settings = SmtpSettings(
@@ -203,6 +206,47 @@ class EmailDeliveryServiceTests(unittest.TestCase):
         mock_server.login.assert_called_once_with("noreply@neximet.com", "mock_pass")
         mock_server.send_message.assert_called_once()
 
+    @patch("smtplib.SMTP")
+    def test_live_smtp_dispatch_uses_starttls_on_port_587(self, mock_smtp_cls):
+        mock_server = MagicMock()
+        mock_server.send_message.return_value = {}
+        mock_smtp_cls.return_value.__enter__.return_value = mock_server
+        settings = SmtpSettings(
+            allow_live_send=True,
+            smtp_host="smtp.test.invalid",
+            smtp_port=587,
+            smtp_secure=False,
+            smtp_user="test-user",
+            smtp_pass=SecretStr("synthetic-password"),
+        )
+
+        result = EmailDeliveryService(settings=settings).send_booking_confirmation(self.sample_booking)
+
+        self.assertTrue(result.success)
+        mock_smtp_cls.assert_called_once_with("smtp.test.invalid", 587, timeout=15)
+        mock_server.starttls.assert_called_once()
+        mock_server.login.assert_called_once_with("test-user", "synthetic-password")
+        mock_server.send_message.assert_called_once()
+
+    @patch("smtplib.SMTP")
+    def test_starttls_failure_does_not_send_mail(self, mock_smtp_cls):
+        mock_server = MagicMock()
+        mock_server.starttls.side_effect = ssl.SSLError("synthetic TLS failure")
+        mock_smtp_cls.return_value.__enter__.return_value = mock_server
+        settings = SmtpSettings(
+            allow_live_send=True,
+            smtp_host="smtp.test.invalid",
+            smtp_port=587,
+            smtp_secure=False,
+            smtp_user="test-user",
+            smtp_pass=SecretStr("synthetic-password"),
+        )
+
+        result = EmailDeliveryService(settings=settings).send_booking_confirmation(self.sample_booking)
+
+        self.assertFalse(result.success)
+        mock_server.send_message.assert_not_called()
+
 
 class CommunicationsRoutesTests(unittest.TestCase):
     """Test API route endpoints for communications."""
@@ -218,14 +262,15 @@ class CommunicationsRoutesTests(unittest.TestCase):
     def tearDown(self):
         self.mongo.close()
 
-    def test_send_booking_confirmation_route(self):
+    def test_send_booking_confirmation_route_denied(self):
+        """Legacy route rejects booking_confirmation template under Ticket N07 security policy."""
         req = SendEmailRequest(
             booking_intent_id=self.intent_id,
             template="booking_confirmation",
         )
-        result = send_communication(request=req, store=self.store, email_service=self.email_svc)
-        self.assertTrue(result.success)
-        self.assertEqual(result.template, "booking_confirmation")
+        with self.assertRaises(HTTPException) as ctx:
+            send_communication(request=req, store=self.store, email_service=self.email_svc)
+        self.assertEqual(ctx.exception.status_code, 403)
 
     def test_send_special_request_route(self):
         req = SendEmailRequest(
@@ -269,11 +314,11 @@ class CommunicationsRoutesTests(unittest.TestCase):
         self.assertFalse(response["payment_mutated"])
         self.assertEqual(response["category"], "dietary")
 
-    def test_download_itinerary_pdf_route(self):
-        response = download_itinerary_pdf(booking_intent_id=self.intent_id, store=self.store)
-        self.assertEqual(response.media_type, "application/pdf")
-        self.assertTrue(response.body.startswith(b"%PDF"))
-        self.assertIn("Content-Disposition", response.headers)
+    def test_download_itinerary_pdf_route_denied(self):
+        """Unscoped itinerary download via legacy route is denied under Ticket N07 security policy."""
+        with self.assertRaises(HTTPException) as ctx:
+            download_itinerary_pdf(booking_intent_id=self.intent_id, store=self.store)
+        self.assertEqual(ctx.exception.status_code, 403)
 
 
 if __name__ == "__main__":

@@ -3,14 +3,30 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 import email.utils
+import hashlib
+from pathlib import Path
+import re
 import smtplib
+import ssl
 import uuid
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import html
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
+from urllib.parse import urlsplit
+
+if TYPE_CHECKING:
+    from rosapenna_backend.api.schemas.communications import (
+        BookingConfirmationSnapshot,
+        ConfirmationDeliveryState,
+    )
+    from rosapenna_backend.api.schemas.pre_arrival import (
+        EligibleBookingInput,
+        PreArrivalPolicyDoc,
+    )
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -1093,14 +1109,591 @@ Please contact reservations@rosapenna.ie or call +353 (0)74 915 5301.
 
         password = self.settings.smtp_pass.get_secret_value()
 
+        if not self.settings.smtp_host or not self.settings.from_email:
+            raise ValueError("SMTP host and sender address must be configured")
+        if not self.settings.smtp_user or not password:
+            raise ValueError("SMTP username and password must both be configured")
+
+        context = ssl.create_default_context()
         if self.settings.smtp_port == 465 or self.settings.smtp_secure:
-            with smtplib.SMTP_SSL(self.settings.smtp_host, self.settings.smtp_port, timeout=15) as server:
-                if self.settings.smtp_user and password:
-                    server.login(self.settings.smtp_user, password)
-                server.send_message(msg, from_addr=self.settings.from_email, to_addrs=recipients)
+            connection = smtplib.SMTP_SSL(
+                self.settings.smtp_host, self.settings.smtp_port, timeout=15, context=context
+            )
         else:
-            with smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=15) as server:
-                server.starttls()
-                if self.settings.smtp_user and password:
-                    server.login(self.settings.smtp_user, password)
-                server.send_message(msg, from_addr=self.settings.from_email, to_addrs=recipients)
+            connection = smtplib.SMTP(self.settings.smtp_host, self.settings.smtp_port, timeout=15)
+
+        with connection as server:
+            if not (self.settings.smtp_port == 465 or self.settings.smtp_secure):
+                server.ehlo()
+                server.starttls(context=context)
+                server.ehlo()
+            if self.settings.smtp_user:
+                server.login(self.settings.smtp_user, password)
+            refused = server.send_message(msg, from_addr=self.settings.from_email, to_addrs=recipients)
+            if refused:
+                raise smtplib.SMTPRecipientsRefused(refused)
+
+
+# ==============================================================================
+# Ticket N07: Dedicated Render & Transport Adapters
+# ==============================================================================
+
+
+@dataclass
+class TransportSubmitOutcome:
+    """Outcome of submitting a confirmation message to a transport."""
+
+    state: str  # ConfirmationDeliveryState
+    evidence_source: str
+    accepted_recipient: Optional[str] = None
+    provider_reference: Optional[str] = None
+    error_code: Optional[str] = None
+    error_details: Optional[str] = None
+
+
+class ConfirmationTransportProtocol:
+    """Interface for N07 confirmation transport."""
+
+    def submit(
+        self,
+        message_bytes: bytes,
+        envelope_recipient: str,
+        message_id: str,
+        attempt_id: str,
+    ) -> TransportSubmitOutcome:
+        raise NotImplementedError
+
+
+class DisabledConfirmationTransport(ConfirmationTransportProtocol):
+    """Fails closed and denies any real or simulated transmission."""
+
+    def submit(
+        self,
+        message_bytes: bytes,
+        envelope_recipient: str,
+        message_id: str,
+        attempt_id: str,
+    ) -> TransportSubmitOutcome:
+        return TransportSubmitOutcome(
+            state="blocked_dependency",
+            evidence_source="disabled_transport",
+            error_code="TRANSPORT_DISABLED",
+            error_details="Live email submission is disabled for N07 structure.",
+        )
+
+
+class RecordingConfirmationTransport(ConfirmationTransportProtocol):
+    """Test transport that records messages locally to disk.
+
+    Guarantees:
+    - Enforces that envelope_recipient ends with '.invalid' test domain.
+    - Rejects real recipient domains to prevent accidental email leakage.
+    - Simulates controllable outcomes (success, refusal, permanent_failure, timeout).
+    """
+
+    def __init__(
+        self,
+        recording_dir: Path | str,
+        simulated_behavior: Optional[Dict[str, str]] = None,
+        owned_root: Optional[Path | str] = None,
+    ):
+        configured_dir = Path(recording_dir).expanduser()
+        if not configured_dir.is_absolute():
+            raise ValueError("Recording directory must be an absolute path")
+        if configured_dir.is_symlink():
+            raise ValueError("Recording directory cannot be a symbolic link")
+        configured_dir.mkdir(parents=True, exist_ok=True)
+        self.recording_dir = configured_dir.resolve(strict=True)
+        if not self.recording_dir.is_dir():
+            raise ValueError("Recording path must be a directory")
+        root = Path(owned_root).expanduser().resolve(strict=True) if owned_root else self.recording_dir
+        if self.recording_dir != root and root not in self.recording_dir.parents:
+            raise ValueError("Recording directory must stay inside its owned test root")
+        self._configured_dir = configured_dir
+        self._owned_root = root
+        self.simulated_behavior = simulated_behavior or {}
+        self.recorded_submissions: List[Dict[str, Any]] = []
+
+    @staticmethod
+    def _valid_test_mailbox(address: str) -> bool:
+        if not isinstance(address, str) or len(address) > 254 or any(ord(char) < 33 or ord(char) == 127 for char in address):
+            return False
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?\.invalid", address):
+            return False
+        local, domain = address.rsplit("@", 1)
+        return ".." not in local and ".." not in domain and not local.endswith(".")
+
+    def submit(
+        self,
+        message_bytes: bytes,
+        envelope_recipient: str,
+        message_id: str,
+        attempt_id: str,
+    ) -> TransportSubmitOutcome:
+        clean_recipient = envelope_recipient.strip().lower() if isinstance(envelope_recipient, str) else ""
+        if not self._valid_test_mailbox(clean_recipient):
+            return TransportSubmitOutcome(
+                state="permanent_failure",
+                evidence_source="recording_adapter",
+                error_code="NON_TEST_RECIPIENT_REJECTED",
+                error_details="Recipient must be one valid .invalid test mailbox",
+            )
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", attempt_id):
+            return TransportSubmitOutcome(
+                state="permanent_failure",
+                evidence_source="recording_adapter",
+                error_code="INVALID_ATTEMPT_ID",
+            )
+        if len(message_bytes) > 4 * 1024 * 1024:
+            return TransportSubmitOutcome(
+                state="permanent_failure",
+                evidence_source="recording_adapter",
+                error_code="MESSAGE_TOO_LARGE",
+            )
+
+        behavior = self.simulated_behavior.get(clean_recipient, self.simulated_behavior.get("default", "success"))
+
+        if behavior == "refusal":
+            return TransportSubmitOutcome(
+                state="retryable_failure",
+                evidence_source="recording_adapter",
+                error_code="SIMULATED_RECIPIENT_REFUSAL",
+                error_details="Simulated temporary SMTP mailbox unavailable (450)",
+            )
+        elif behavior == "permanent_failure":
+            return TransportSubmitOutcome(
+                state="permanent_failure",
+                evidence_source="recording_adapter",
+                error_code="SIMULATED_PERMANENT_REFUSAL",
+                error_details="Simulated permanent 550 recipient rejected",
+            )
+        elif behavior == "timeout":
+            return TransportSubmitOutcome(
+                state="unknown",
+                evidence_source="recording_adapter",
+                error_code="SIMULATED_TIMEOUT_POST_SUBMISSION",
+                error_details="Simulated socket timeout while waiting for 250 response",
+            )
+
+        # Use a generated filename. Never place an address or request value in a path.
+        if self._configured_dir.resolve(strict=True) != self.recording_dir:
+            raise ValueError("Recording directory changed after transport setup")
+        if self.recording_dir != self._owned_root and self._owned_root not in self.recording_dir.parents:
+            raise ValueError("Recording directory is outside its owned test root")
+        file_path = self.recording_dir / f"confirmation-{uuid.uuid4().hex}.eml"
+        if file_path.resolve(strict=False).parent != self.recording_dir:
+            raise ValueError("Recording output path is outside the test sink")
+        with file_path.open("xb") as output:
+            output.write(message_bytes)
+
+        record = {
+            "attempt_id": attempt_id,
+            "recipient": clean_recipient,
+            "message_id": message_id,
+            "bytes_length": len(message_bytes),
+            "file_path": str(file_path),
+            "timestamp": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        self.recorded_submissions.append(record)
+
+        return TransportSubmitOutcome(
+            state="recorded_test",
+            evidence_source="recording_adapter",
+            accepted_recipient=clean_recipient,
+            provider_reference=f"REC-{attempt_id[:8]}",
+        )
+
+
+def render_n07_email_message(
+    snapshot: BookingConfirmationSnapshot,
+    recipient_role: Literal["guest", "hotel"],
+    pdf_bytes: bytes,
+    attempt_id: str,
+    recipient_address: Optional[str] = None,
+    message_date: Optional[str] = None,
+    message_id: Optional[str] = None,
+    from_email: str = "noreply@rosapenna.invalid",
+    from_name: str = "Rosapenna Hotel & Golf Resort",
+) -> tuple[str, str, str, bytes, str]:
+    """Compile email subject, plain text, HTML, and MIME bytes for Ticket N07.
+
+    Returns:
+        (subject, plain_text, html_body, mime_bytes, message_id)
+    """
+    ref = snapshot.booking_reference
+    rev = snapshot.booking_revision
+    lead = snapshot.lead_guest
+    guest_name = f"{lead.first_name} {lead.last_name}"
+
+    subject = f"TEST — NOT A REAL BOOKING CONFIRMATION — Rosapenna Hotel & Golf Resort ({ref})"
+    message_id = message_id or f"<{ref}.r{rev}.{recipient_role}.{attempt_id}@rosapenna.invalid>"
+
+    target_recipient = recipient_address or (lead.email if recipient_role == "guest" else "hotel@rosapenna.invalid")
+    if not RecordingConfirmationTransport._valid_test_mailbox(target_recipient):
+        raise ValueError("N07 message recipient must be one .invalid test mailbox")
+    if not re.fullmatch(r"<[^<>\s\r\n]{1,240}>", message_id):
+        raise ValueError("N07 Message-ID is malformed")
+
+    # Plain text
+    plain_body = f"""*** TEST — NOT A REAL BOOKING CONFIRMATION ***
+This is a synthetic test artifact for Rosapenna booking confirmation verification.
+
+Booking Reference: {ref} (Revision #{rev})
+Status: Confirmed (Test)
+Lead Guest: {guest_name}
+Stay Dates: {snapshot.stay.arrival_date} to {snapshot.stay.departure_date}
+
+Rooms Booked:
+"""
+    for r in snapshot.stay.rooms:
+        plain_body += f"- {r.room_group_id}: {r.room_category} (Qty: {r.room_quantity})\n"
+
+    if snapshot.golf_rounds:
+        plain_body += "\nChampionship Golf Itinerary:\n"
+        for g in snapshot.golf_rounds:
+            names = f"; Golfers: {', '.join(g.golfer_names)}" if g.golfer_names else ""
+            plain_body += f"- {g.date} at {g.tee_time}: {g.course_name} ({g.players} players, {g.holes} holes){names}\n"
+
+    fin = snapshot.financials
+    plain_body += f"""
+Financial Settlement:
+- Total Stay & Play: {fin.currency} {fin.total_amount}
+- Deposit Paid: {fin.currency} {fin.deposit_paid}
+- Total Verified Paid: {fin.currency} {fin.verified_paid_total}
+- Remaining Balance Due: {fin.currency} {fin.balance_due} (Due: {fin.balance_due_date})
+
+Official PDF itinerary is attached.
+"""
+    if snapshot.payments:
+        plain_body += "Verified Payments:\n"
+        for payment in snapshot.payments:
+            plain_body += f"- {payment.payment_purpose.title()}: {payment.currency} {payment.amount} (verified {payment.verified_at})\n"
+
+    # HTML body
+    rooms_html = "".join(
+        f"<li><b>{html.escape(r.room_group_id)}</b>: {html.escape(r.room_category)} (Qty: {r.room_quantity})</li>"
+        for r in snapshot.stay.rooms
+    )
+    golf_html = "".join(
+        f"<li><b>{html.escape(g.date)}</b> at {html.escape(g.tee_time)}: {html.escape(g.course_name)} ({g.players} players, {g.holes} holes)"
+        + (f"; Golfers: {html.escape(', '.join(g.golfer_names))}" if g.golfer_names else "")
+        + "</li>"
+        for g in snapshot.golf_rounds
+    )
+    if golf_html:
+        golf_section = f"<h3>Championship Golf</h3><ul>{golf_html}</ul>"
+    else:
+        golf_section = ""
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>{html.escape(subject)}</title>
+</head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #0F172A; max-width: 600px; margin: 0 auto; padding: 20px;">
+    <div style="background-color: #FEE2E2; border: 2px solid #EF4444; color: #B91C1C; padding: 12px; text-align: center; font-weight: bold; border-radius: 4px; margin-bottom: 20px;">
+        TEST — NOT A REAL BOOKING CONFIRMATION
+    </div>
+
+    <h2 style="color: #1A3323; margin-top: 0;">Rosapenna Hotel &amp; Golf Resort</h2>
+    <p>Dear {html.escape(guest_name)},</p>
+    <p>Thank you for booking your Stay &amp; Play package. This is your test confirmation record.</p>
+
+    <div style="background-color: #F8F9FA; border: 1px solid #E2E8F0; padding: 15px; border-radius: 4px; margin: 20px 0;">
+        <p style="margin: 0 0 8px 0;"><b>Booking Reference:</b> {html.escape(ref)} (Revision #{rev})</p>
+        <p style="margin: 0 0 8px 0;"><b>Dates:</b> {html.escape(snapshot.stay.arrival_date)} to {html.escape(snapshot.stay.departure_date)}</p>
+        <p style="margin: 0;"><b>Status:</b> Confirmed (Test)</p>
+    </div>
+
+    <h3>Accommodation</h3>
+    <ul>{rooms_html}</ul>
+
+    {golf_section}
+
+    <h3>Financial Summary</h3>
+    <table style="width: 100%; border-collapse: collapse; margin-bottom: 20px;">
+        <tr>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0;">Total Amount:</td>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0; text-align: right; font-weight: bold;">{html.escape(fin.currency)} {html.escape(fin.total_amount)}</td>
+        </tr>
+        <tr>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0;">Deposit Paid:</td>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0; text-align: right; font-weight: bold; color: #166534;">{html.escape(fin.currency)} {html.escape(fin.deposit_paid)}</td>
+        </tr>
+        <tr>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0;">Total Verified Paid:</td>
+            <td style="padding: 6px 0; border-bottom: 1px solid #E2E8F0; text-align: right; font-weight: bold; color: #166534;">{html.escape(fin.currency)} {html.escape(fin.verified_paid_total)}</td>
+        </tr>
+        <tr>
+            <td style="padding: 6px 0; font-weight: bold;">Remaining Balance:</td>
+            <td style="padding: 6px 0; text-align: right; font-weight: bold; color: #B91C1C;">{html.escape(fin.currency)} {html.escape(fin.balance_due)}</td>
+        </tr>
+        <tr>
+            <td style="padding: 4px 0; font-size: 13px; color: #64748B;">Balance Due Date:</td>
+            <td style="padding: 4px 0; text-align: right; font-size: 13px; color: #64748B;">{html.escape(fin.balance_due_date)}</td>
+        </tr>
+    </table>
+
+    {"<h3>Verified Payments</h3><ul>" + "".join(f"<li>{html.escape(payment.payment_purpose.title())}: {html.escape(payment.currency)} {html.escape(payment.amount)} (verified {html.escape(payment.verified_at)})</li>" for payment in snapshot.payments) + "</ul>" if snapshot.payments else ""}
+
+    <p>Your official itinerary document is attached to this email as a PDF.</p>
+    <hr style="border: none; border-top: 1px solid #E2E8F0; margin: 20px 0;">
+    <p style="font-size: 12px; color: #64748B; text-align: center;">Rosapenna Hotel &amp; Golf Resort &bull; Downings, Co. Donegal, Ireland</p>
+</body>
+</html>
+"""
+
+    # Build MIME message
+    msg = MIMEMultipart("mixed")
+    msg["From"] = f"{from_name} <{from_email}>"
+    msg["To"] = target_recipient
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id
+    if message_date:
+        parsed_date = dt.datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+        if parsed_date.tzinfo is None:
+            raise ValueError("Confirmation message date must include a time zone")
+    else:
+        parsed_date = dt.datetime.now(dt.timezone.utc)
+    msg["Date"] = email.utils.format_datetime(parsed_date)
+    msg["X-Rosapenna-Test"] = "true"
+    msg["X-Booking-Reference"] = ref
+    msg["X-Recipient-Role"] = recipient_role
+
+    alt_part = MIMEMultipart("alternative")
+    alt_part.attach(MIMEText(plain_body, "plain", "utf-8"))
+    alt_part.attach(MIMEText(html_body, "html", "utf-8"))
+    msg.attach(alt_part)
+
+    if pdf_bytes:
+        pdf_part = MIMEApplication(pdf_bytes, _subtype="pdf")
+        pdf_filename = f"Rosapenna-Itinerary-{ref}.pdf"
+        pdf_part.add_header("Content-Disposition", "attachment", filename=pdf_filename)
+        msg.attach(pdf_part)
+
+    mime_bytes = msg.as_bytes()
+    if len(mime_bytes) > 4 * 1024 * 1024:
+        raise ValueError("Total MIME message exceeds 4 MiB size limit")
+
+    return subject, plain_body, html_body, mime_bytes, message_id
+
+
+def render_n08_pre_arrival_message(
+    booking: EligibleBookingInput,
+    reminder_type: Literal["balance_due_first", "rooming_and_caddy"],
+    policy: PreArrivalPolicyDoc,
+    attempt_id: str,
+    action_url: Optional[str] = None,
+    mmb_enabled: bool = False,
+    message_id: Optional[str] = None,
+    message_date: Optional[str] = None,
+    is_test: bool = True,
+) -> tuple[str, str, str, bytes, str, str]:
+    """Compile email subject, plain text, HTML, MIME bytes, and content hash for Ticket N08.
+
+    Returns:
+        (subject, plain_text, html_body, mime_bytes, message_id, message_hash)
+    """
+    ref = booking.booking_reference
+    rev = booking.revision
+    guest_name = booking.lead_name or "Valued Guest"
+    safe_guest_name = html.escape(guest_name)
+    safe_ref = html.escape(str(ref))
+    arr_date_str = booking.arrival_date.isoformat()
+
+    # Logical headers verification
+    for val, name in [
+        (policy.sender_name, "sender_name"),
+        (policy.sender_email, "sender_email"),
+        (booking.lead_email, "lead_email"),
+    ]:
+        if "\r" in val or "\n" in val:
+            raise ValueError(f"CR/LF characters are strictly forbidden in header {name}")
+
+    target_recipient = booking.lead_email.strip().lower()
+    if is_test and not RecordingConfirmationTransport._valid_test_mailbox(target_recipient):
+        raise ValueError("N08 test message recipient must be one valid .invalid test mailbox")
+
+    message_id = message_id or f"<{ref}.r{rev}.{reminder_type}.{attempt_id}@rosapenna.invalid>"
+    if not re.fullmatch(r"<[^<>\s\r\n]{1,240}>", message_id):
+        raise ValueError("N08 Message-ID is malformed or contains invalid characters")
+
+    test_prefix = "TEST — NOT A REAL EMAIL — " if is_test else ""
+
+    # Validate action url if supplied
+    safe_action_link_html = ""
+    safe_action_link_plain = ""
+    if action_url:
+        clean_url = action_url.strip()
+        if "\r" in clean_url or "\n" in clean_url:
+            raise ValueError("CR/LF forbidden in action URL")
+        if len(clean_url) > 2000:
+            raise ValueError("Action URL exceeds maximum allowed length")
+        parsed = urlsplit(clean_url)
+        if parsed.scheme != "https":
+            raise ValueError("Action URL must use secure HTTPS")
+        if parsed.username or parsed.password:
+            raise ValueError("Action URL must not contain user credentials")
+        if parsed.port and parsed.port not in (443, 8443):
+            raise ValueError("Action URL uses unexpected port")
+        allowed_hosts = {"rosapenna.ie", "www.rosapenna.ie", "localhost", "127.0.0.1"}
+        host = (parsed.hostname or "").lower()
+        if host not in allowed_hosts and not (is_test and host.endswith(".invalid")):
+            raise ValueError(f"Action URL host '{parsed.hostname}' is not an approved destination")
+        safe_href = html.escape(clean_url, quote=True)
+        if reminder_type == "balance_due_first":
+            safe_action_link_html = (
+                f'<p style="margin: 20px 0;"><a href="{safe_href}" style="background-color: #1A3323; '
+                f'color: #ffffff; padding: 12px 20px; text-decoration: none; border-radius: 4px; '
+                f'font-weight: bold; display: inline-block;">Settle Outstanding Balance Online</a></p>'
+            )
+            safe_action_link_plain = f"\nSettle balance online: {clean_url}\n"
+        else:
+            safe_action_link_html = (
+                f'<p style="margin: 20px 0;"><a href="{safe_href}" style="background-color: #1A3323; '
+                f'color: #ffffff; padding: 12px 20px; text-decoration: none; border-radius: 4px; '
+                f'font-weight: bold; display: inline-block;">Complete Preferences Form Online</a></p>'
+            )
+            safe_action_link_plain = f"\nComplete preferences online: {clean_url}\n"
+    elif mmb_enabled:
+        mmb_url = f"https://rosapenna.ie/manage-booking?ref={html.escape(ref, quote=True)}"
+        safe_action_link_html = (
+            f'<p>To view your itinerary or manage details, please visit '
+            f'<a href="{mmb_url}">Manage My Booking</a>.</p>'
+        )
+        safe_action_link_plain = f"\nManage booking: https://rosapenna.ie/manage-booking?ref={ref}\n"
+    else:
+        safe_action_link_html = (
+            '<p>To discuss your booking or requirements, please contact our Reservations team at '
+            '<a href="mailto:reservations@rosapenna.ie">reservations@rosapenna.ie</a> '
+            'or call +353 (0)74 915 5301.</p>'
+        )
+        safe_action_link_plain = (
+            "\nContact Reservations at reservations@rosapenna.ie or call +353 (0)74 915 5301.\n"
+        )
+
+    if reminder_type == "balance_due_first":
+        bal_lead = policy.balance_request_lead_days or 42
+        subject = f"{test_prefix}Pre-Arrival Balance Payment Request – Rosapenna ({ref})"
+        title = f"Balance Payment Request ({bal_lead} Days Prior)"
+        bal_due_date = (booking.arrival_date - dt.timedelta(days=policy.balance_due_lead_days)).isoformat()
+        bal_str = f"{booking.currency} {booking.balance_due:.2f}"
+
+        plain_body = f"""{test_prefix}ROSAPENNA HOTEL & GOLF RESORT
+{title}
+Booking Reference: {ref} (Revision #{rev})
+Arrival Date: {arr_date_str}
+
+Dear {guest_name},
+
+We look forward to welcoming you to Rosapenna Hotel & Golf Resort.
+Your remaining balance of {bal_str} is due strictly by {bal_due_date}.
+{safe_action_link_plain}
+Reservations Team
+Rosapenna Hotel & Golf Resort
+reservations@rosapenna.ie
+"""
+        content_html = f"""
+            <p>Dear {safe_guest_name},</p>
+            <p>We are delighted to welcome you to Rosapenna Hotel & Golf Resort for your upcoming stay.</p>
+            <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                <p style="margin: 0 0 8px 0; font-size: 15px;"><b>Booking Reference:</b> {safe_ref} (Revision #{rev})</p>
+                <p style="margin: 0 0 8px 0; font-size: 15px;"><b>Arrival Date:</b> {html.escape(arr_date_str)}</p>
+                <p style="margin: 0 0 8px 0; color: #b91c1c; font-weight: bold; font-size: 16px;">
+                    Remaining Balance Due: {html.escape(bal_str)}
+                </p>
+                <p style="margin: 0; font-size: 14px; color: #475569;">
+                    <b>Due Date:</b> {html.escape(bal_due_date)}
+                </p>
+            </div>
+            {safe_action_link_html}
+        """
+    else:  # rooming_and_caddy
+        subject = f"{test_prefix}Pre-Arrival Rooming List & Caddy Preferences – Rosapenna ({ref})"
+        title = "Rooming List & Caddy Requirements (6 Weeks Prior)"
+
+        plain_body = f"""{test_prefix}ROSAPENNA HOTEL & GOLF RESORT
+{title}
+Booking Reference: {ref} (Revision #{rev})
+Arrival Date: {arr_date_str}
+
+Dear {guest_name},
+
+As your stay at Rosapenna Hotel & Golf Resort approaches, please provide your rooming party details (names of occupants) and any caddy requirements.
+
+Please note: Caddies are allocated subject to availability and paid directly at the resort.
+{safe_action_link_plain}
+Reservations Team
+Rosapenna Hotel & Golf Resort
+reservations@rosapenna.ie
+"""
+        content_html = f"""
+            <p>Dear {safe_guest_name},</p>
+            <p>As your stay at Rosapenna Hotel & Golf Resort approaches for Booking <b>{safe_ref}</b>, we kindly invite you to confirm your rooming party details and caddy preferences.</p>
+            <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
+                <p style="margin: 0 0 8px 0;"><b>Rooming Party:</b> Please provide the names of all occupants sharing each room to ensure a seamless check-in experience.</p>
+                <p style="margin: 0;"><b>Caddy Requests:</b> Caddies are allocated on request subject to availability and settled directly at the resort.</p>
+            </div>
+            {safe_action_link_html}
+        """
+
+    test_banner_html = (
+        '<div style="background-color: #FEF3C7; border: 1px solid #F59E0B; padding: 10px; '
+        'margin-bottom: 15px; border-radius: 4px; text-align: center; font-weight: bold; color: #92400E;">'
+        '*** TEST — NOT A REAL EMAIL — SYNTHETIC VERIFICATION ARTIFACT ***'
+        '</div>'
+        if is_test
+        else ""
+    )
+
+    html_body = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #1a202c; max-width: 600px; margin: 0 auto; padding: 20px;">
+    {test_banner_html}
+    <div style="background-color: #1A3323; padding: 15px; text-align: center; border-bottom: 3px solid #DBB155;">
+        <h2 style="color: #ffffff; margin: 0; font-size: 18px;">ROSAPENNA HOTEL &amp; GOLF RESORT</h2>
+        <p style="color: #DBB155; margin: 5px 0 0 0; font-size: 12px;">{html.escape(title)}</p>
+    </div>
+    <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none;">
+        {content_html}
+        <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 20px 0;" />
+        <p style="font-size: 12px; color: #64748b; text-align: center;">
+            Reservations Team &bull; Rosapenna Hotel &amp; Golf Resort &bull; reservations@rosapenna.ie
+        </p>
+    </div>
+</body>
+</html>"""
+
+    # Build MIME
+    msg = MIMEMultipart("alternative")
+    msg["From"] = f"{policy.sender_name} <{policy.sender_email}>"
+    msg["To"] = target_recipient
+    msg["Subject"] = subject
+    msg["Message-ID"] = message_id
+    if policy.reply_to:
+        msg["Reply-To"] = policy.reply_to
+
+    if message_date:
+        parsed_date = dt.datetime.fromisoformat(message_date.replace("Z", "+00:00"))
+        if parsed_date.tzinfo is None:
+            raise ValueError("Message date must include a timezone")
+    else:
+        parsed_date = dt.datetime.now(dt.timezone.utc)
+    msg["Date"] = email.utils.format_datetime(parsed_date)
+    msg["X-Rosapenna-Test"] = "true" if is_test else "false"
+    msg["X-Booking-Reference"] = ref
+    msg["X-Reminder-Type"] = reminder_type
+
+    msg.attach(MIMEText(plain_body, "plain", "utf-8"))
+    msg.attach(MIMEText(html_body, "html", "utf-8"))
+
+    mime_bytes = msg.as_bytes()
+    if len(mime_bytes) > 2 * 1024 * 1024:
+        raise ValueError("N08 pre-arrival email MIME exceeds 2 MiB limit")
+
+    content_hash_payload = f"{subject}|{plain_body}|{html_body}".encode("utf-8")
+    message_hash = hashlib.sha256(content_hash_payload).hexdigest()
+
+    return subject, plain_body, html_body, mime_bytes, message_id, message_hash

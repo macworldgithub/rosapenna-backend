@@ -17,6 +17,7 @@ import datetime as dt
 from decimal import Decimal
 import hashlib
 import hmac
+import secrets
 import unittest
 from mongomock import MongoClient
 from fastapi import HTTPException, Response
@@ -399,7 +400,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
         )
         settle_resp = self.amendment_service.initiate_amendment_settlement(settle_req)
 
-        secret = "rosapenna-dev-webhook-secret-key"
+        secret = secrets.token_urlsafe(32)
         now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
 
         # 1. Valid signed callback
@@ -414,7 +415,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
             timestamp=now_ts,
             provider_signature=valid_sig,
         )
-        cb_resp = self.pricing_service.process_payment_callback(cb_req)
+        cb_resp = self.pricing_service.process_payment_callback(cb_req, secret)
         self.assertEqual(cb_resp["payment_state"], "verified_paid")
 
         # 2. Forged signature rejected
@@ -427,7 +428,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
             provider_signature="invalid_forged_signature",
         )
         with self.assertRaises(ValueError):
-            self.pricing_service.process_payment_callback(forged_req)
+            self.pricing_service.process_payment_callback(forged_req, secret)
 
         # 3. Skewed timestamp (> 300s) rejected
         skewed_ts = now_ts - 500
@@ -443,7 +444,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
             provider_signature=skewed_sig,
         )
         with self.assertRaises(ValueError):
-            self.pricing_service.process_payment_callback(skewed_req)
+            self.pricing_service.process_payment_callback(skewed_req, secret)
 
     def test_idempotent_duplicate_payment_callback(self):
         """AC 4: Duplicate webhooks do not double-count or alter ledger."""
@@ -460,7 +461,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
             )
         )
 
-        secret = "rosapenna-dev-webhook-secret-key"
+        secret = secrets.token_urlsafe(32)
         now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
         payload = f"{settle_resp.payment_id}:txn_dup_m08:paid:{settle_resp.amount_due_now}:{now_ts}"
         sig = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -474,11 +475,11 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
             provider_signature=sig,
         )
         # First execution -> transitions to verified_paid
-        resp1 = self.pricing_service.process_payment_callback(cb_req)
+        resp1 = self.pricing_service.process_payment_callback(cb_req, secret)
         self.assertEqual(resp1["payment_state"], "verified_paid")
 
         # Second execution -> returns already_processed idempotently
-        resp2 = self.pricing_service.process_payment_callback(cb_req)
+        resp2 = self.pricing_service.process_payment_callback(cb_req, secret)
         self.assertEqual(resp2["status"], "already_processed")
 
     def test_paid_unconfirmed_recovery(self):
@@ -497,7 +498,7 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
         )
 
         # Simulate verified payment
-        secret = "rosapenna-dev-webhook-secret-key"
+        secret = secrets.token_urlsafe(32)
         now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
         payload = f"{settle_resp.payment_id}:txn_settled_rec:paid:{settle_resp.amount_due_now}:{now_ts}"
         sig = hmac.new(secret.encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
@@ -509,7 +510,8 @@ class TestMmbAmendmentPaymentAndCredit(unittest.TestCase):
                 amount=settle_resp.amount_due_now,
                 timestamp=now_ts,
                 provider_signature=sig,
-            )
+            ),
+            secret,
         )
 
         # Trigger paid-unconfirmed recovery upon downstream vendor write error

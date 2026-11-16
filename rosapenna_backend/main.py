@@ -13,6 +13,7 @@ from rosapenna_backend.api.routes import (
     booking_intents,
     booking_linkage,
     booking_operations,
+    booking_confirmations,
     bookings,
     communications,
     golf_rounds,
@@ -26,6 +27,7 @@ from rosapenna_backend.api.routes import (
     mmb_occupants,
     mmb_requests,
     packages,
+    pre_arrival,
     revised_confirmations,
     rooms,
     staff_operations,
@@ -72,6 +74,10 @@ OPENAPI_TAGS = [
     {
         "name": "communications",
         "description": "Itinerary rendering, email dispatch, and guest request communication services.",
+    },
+    {
+        "name": "Staff Pre-Arrival Scheduling",
+        "description": "Staff management and recovery endpoints for durable pre-arrival communication scheduling (Ticket N08).",
     },
     {
         "name": "health",
@@ -208,6 +214,7 @@ def create_app() -> FastAPI:
     application.include_router(bookings.router)
     application.include_router(booking_intents.router)
     application.include_router(booking_operations.router)
+    application.include_router(booking_confirmations.router)
     application.include_router(communications.router)
     application.include_router(staff_operations.router)
     application.include_router(mmb_auth.router)
@@ -220,8 +227,12 @@ def create_app() -> FastAPI:
     application.include_router(booking_linkage.router)
     application.include_router(staff_requests.router)
     application.include_router(revised_confirmations.router)
+    application.include_router(pre_arrival.router)
     application.include_router(mmb_history.router)
     application.include_router(staff_recovery.router)
+    if settings.simulation_enabled and settings.environment in ("development", "test"):
+        from rosapenna_backend.api.routes import simulation
+        application.include_router(simulation.router)
     return application
 
 
