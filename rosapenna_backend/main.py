@@ -10,6 +10,8 @@ from starlette.concurrency import run_in_threadpool
 
 from rosapenna_backend.api.routes import (
     availability,
+    balance_payment_events,
+    balance_payments,
     booking_intents,
     booking_linkage,
     booking_operations,
@@ -230,6 +232,8 @@ def create_app() -> FastAPI:
     application.include_router(pre_arrival.router)
     application.include_router(mmb_history.router)
     application.include_router(staff_recovery.router)
+    application.include_router(balance_payments.router)
+    application.include_router(balance_payment_events.router)
     if settings.simulation_enabled and settings.environment in ("development", "test"):
         from rosapenna_backend.api.routes import simulation
         application.include_router(simulation.router)

@@ -435,3 +435,46 @@ def get_pre_arrival_service(request: Request):
         )
         request.app.state.pre_arrival_service = service
     return service
+
+
+def get_balance_payment_service(request: Request):
+    """Factory dependency for Ticket N09 BalancePaymentService."""
+    from rosapenna_backend.services.balance_payments import BalancePaymentService
+    from rosapenna_backend.integrations.payments.balance_gateway import (
+        DisabledBalanceGateway,
+        LocalBalanceGateway,
+    )
+    from rosapenna_backend.config import settings as default_settings
+
+    service = getattr(request.app.state, "balance_payment_service", None)
+    if service is None:
+        db = getattr(request.app.state, "mongo_database", None)
+        app_settings = getattr(request.app.state, "settings", None) or default_settings
+        mode = getattr(app_settings, "balance_payment_mode", "disabled").strip().lower()
+
+        if mode == "simulation":
+            secret = getattr(app_settings, "balance_payment_signing_secret", None) or "synthetic-test-signing-secret-key-32b"
+            gateway = LocalBalanceGateway(
+                signing_secret=secret,
+                environment=getattr(app_settings, "environment", "test").strip().lower(),
+                property_id=getattr(app_settings, "balance_payment_property_id", "ROSA"),
+                test_run_id=getattr(app_settings, "balance_payment_test_run_id", None),
+            )
+        else:
+            gateway = DisabledBalanceGateway()
+
+        linkage_service = get_booking_linkage_service(request)
+        pre_arrival = getattr(request.app.state, "pre_arrival_service", None)
+
+        service = BalancePaymentService(
+            database=db,
+            linkage_service=linkage_service,
+            gateway=gateway,
+            pre_arrival_service=pre_arrival,
+            environment=getattr(app_settings, "environment", "test").strip().lower(),
+            property_id=getattr(app_settings, "balance_payment_property_id", "ROSA"),
+            test_run_id=getattr(app_settings, "balance_payment_test_run_id", None),
+        )
+        request.app.state.balance_payment_service = service
+    return service
+

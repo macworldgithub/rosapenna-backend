@@ -98,28 +98,3 @@ uv run python scripts/run_n08_tests.py
 uv run python scripts/run_n08_worker.py --once --dry-run
 ```
 
----
-
-## Ticket N08: Pre-Arrival Scheduling and Staff Recovery
-
-Ticket N08 implements the offline pre-arrival scheduling, persistence, safe dispatch, and staff recovery interface without executing live guest emails or live Prommt transactions:
-- **Pure Milestone Calculator**: Schedules `balance_due_first` and `rooming_and_caddy` using strict policies (`eight_weeks`, `six_weeks`, or `blocked_dependency` if unresolved).
-- **Channel-Agnostic Inputs**: Normalizes confirmed online and phone/email booking records (via F05/M02 adapter) to current arrival dates and revisions; unconfirmed and cancelled bookings are strictly suppressed.
-- **Durable Persistence & Atomic Locking**: Stores jobs in `scheduled_booking_reminders` collection with atomic `find_one_and_update` claims to prevent duplicate dispatch under concurrency.
-- **Safe Dispatch Mode**: Default `recording_test` transport records synthetic communications to disk (`var/test_pre_arrival_recordings/`); live external email is disabled until explicit written activation.
-- **Staff Recovery Endpoints**: Protected under `/staff/pre-arrival` (requires `BOOKING_PRE_ARRIVAL_STAFF_API_ENABLED=true`):
-  - `GET /staff/pre-arrival/bookings/{booking_reference}/jobs`: inspect scheduled reminders.
-  - `POST /staff/pre-arrival/bookings/{booking_reference}/reconcile`: manually reconcile schedule with current booking revision.
-  - `POST /staff/pre-arrival/jobs/{reminder_id}/retry`: reset failed/stale job with required staff reason.
-- **Guest Protection**: Mutation of reminders via guest endpoints (`POST /api/mmb/confirmations/{ref}/reminders/{reminder_id}/dispatch`) is strictly denied (HTTP 403 Forbidden).
-
----
-
-## Ticket N07: Guest and Hotel Booking Confirmations (Structure Only)
-
-Ticket N07 implements the offline confirmation structure without connecting live mail transport or external services:
-- **Snapshot Contract**: Strict `BookingConfirmationSnapshot` validating exact financials, dates, rooms, and rounds.
-- **Transports**: `RecordingConfirmationTransport` saves synthetic `.eml` files for test domains (`.invalid`); `DisabledConfirmationTransport` fails closed.
-- **Rendering**: Strict PDF rendering (`build_n07_confirmation_pdf`) with XML-escaping, 2 MiB ceiling, and explicit `TEST — NOT A REAL BOOKING CONFIRMATION` banner.
-- **Route Gating**: Protected staff endpoints (`/staff/confirmations/{operation_id}`) require `BOOKING_CONFIRMATIONS_STAFF_API_ENABLED=true` and authenticated staff roles; legacy confirmation templates and unscoped itinerary downloads are strictly denied (HTTP 403).
-

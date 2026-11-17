@@ -95,6 +95,7 @@ class PreArrivalService:
         property_id: str = "ROSA",
         test_run_id: Optional[str] = None,
         mmb_enabled: bool = False,
+        balance_service: Optional[Any] = None,
         reminders_collection_name: str = "scheduled_booking_reminders",
         policies_collection_name: str = "pre_arrival_policies",
         worker_state_collection_name: str = "pre_arrival_worker_state",
@@ -106,6 +107,7 @@ class PreArrivalService:
         self.property_id = property_id.strip().upper()
         self.test_run_id = test_run_id
         self.mmb_enabled = mmb_enabled
+        self.balance_service = balance_service
 
         self.reminders_col: Optional[Collection] = (
             database[reminders_collection_name] if database is not None else None
@@ -463,7 +465,7 @@ class PreArrivalService:
             verified_paid_total=verified_paid,
             currency=fin.get("currency", "EUR"),
             balance_due=balance_due,
-            ledger_version=1,
+            ledger_version=int(linkage_doc.get("ledger_version", 1)),
             rooming_completed=rooming_done,
             caddy_completed=caddy_done,
             evidence_timestamp=clock,
@@ -554,9 +556,20 @@ class PreArrivalService:
         }))
         for ej in existing_jobs:
             if ej.get("eligibility_hash") and ej.get("eligibility_hash") != eligibility_hash:
-                raise PreArrivalConflictError(
-                    f"Schedule conflict: Booking {clean_ref} facts changed on revision {current_rev} without revision bump."
+                # If balance is fully paid, suppress pending balance reminder rather than raising schedule conflict
+                if booking_input.balance_due <= Decimal("0.00") and ej.get("reminder_type") == "balance_due_first":
+                    continue
+                # If stay dates changed without revision bump, raise schedule conflict
+                lead_days = (
+                    active_policy.balance_request_lead_days or 42
+                    if ej.get("reminder_type") == "balance_due_first"
+                    else active_policy.rooming_caddy_lead_days
                 )
+                expected_sched_date = (booking_input.arrival_date - dt.timedelta(days=lead_days)).isoformat()
+                if ej.get("scheduled_date") != expected_sched_date:
+                    raise PreArrivalConflictError(
+                        f"Schedule conflict: Booking {clean_ref} facts changed on revision {current_rev} without revision bump."
+                    )
 
         # 1. Cancel obsolete jobs from prior revisions
         self.reminders_col.update_many(
@@ -593,7 +606,18 @@ class PreArrivalService:
             }
             existing = self.reminders_col.find_one(filter_query)
             if existing:
-                if existing.get("status") == "blocked_dependency" and m["status"] == "scheduled":
+                if existing.get("status") in ("scheduled", "blocked_dependency", "failed") and m["status"] == "suppressed":
+                    self.reminders_col.update_one(
+                        {"_id": existing["_id"]},
+                        {
+                            "$set": {
+                                "status": "suppressed",
+                                "reason_code": m["reason_code"],
+                                "updated_at": clock,
+                            }
+                        },
+                    )
+                elif existing.get("status") == "blocked_dependency" and m["status"] == "scheduled":
                     self.reminders_col.update_one(
                         {"_id": existing["_id"]},
                         {
@@ -834,19 +858,6 @@ class PreArrivalService:
             )
             return self.get_job_by_id(job.reminder_id)
 
-        # Same-revision canonical facts changed check
-        current_hash = booking_input.compute_eligibility_hash()
-        if job.eligibility_hash and job.eligibility_hash != current_hash:
-            self._finalize_job_state(
-                job.reminder_id,
-                attempt_id,
-                "blocked_dependency",
-                "SAME_REVISION_FACTS_CHANGED_CONFLICT",
-                clock,
-                error_details="Booking stay or financial facts changed without revision increment",
-            )
-            return self.get_job_by_id(job.reminder_id)
-
         if booking_input.is_cancelled:
             self._finalize_job_state(
                 job.reminder_id,
@@ -877,6 +888,19 @@ class PreArrivalService:
             )
             return self.get_job_by_id(job.reminder_id)
 
+        # Same-revision canonical facts changed check
+        current_hash = booking_input.compute_eligibility_hash()
+        if job.eligibility_hash and job.eligibility_hash != current_hash:
+            self._finalize_job_state(
+                job.reminder_id,
+                attempt_id,
+                "blocked_dependency",
+                "SAME_REVISION_FACTS_CHANGED_CONFLICT",
+                clock,
+                error_details="Booking stay or financial facts changed without revision increment",
+            )
+            return self.get_job_by_id(job.reminder_id)
+
         try:
             policy = self.get_policy(policy_id=job.policy_id, version=job.policy_version)
         except PreArrivalPolicyError as exc:
@@ -898,13 +922,41 @@ class PreArrivalService:
             msg_id = stored_doc.get("message_id")
             msg_hash = stored_doc.get("message_hash")
         else:
+            action_url: Optional[str] = None
+            if job.reminder_type == "balance_due_first" and self.balance_service is not None:
+                action_url, _, block_reason = self.balance_service.prepare_balance_action(
+                    booking_reference=clean_ref,
+                    expected_booking_revision=job.revision_number,
+                    expected_ledger_version=booking_input.ledger_version,
+                    command_id=f"cmd_n08_{job.reminder_id}_{job.attempt_count}",
+                    now=clock,
+                )
+                if block_reason == "BALANCE_ALREADY_PAID":
+                    self._finalize_job_state(
+                        job.reminder_id,
+                        attempt_id,
+                        "suppressed",
+                        "BALANCE_ALREADY_PAID",
+                        clock,
+                    )
+                    return self.get_job_by_id(job.reminder_id)
+                elif block_reason:
+                    self._finalize_job_state(
+                        job.reminder_id,
+                        attempt_id,
+                        "blocked_dependency",
+                        block_reason,
+                        clock,
+                    )
+                    return self.get_job_by_id(job.reminder_id)
+
             try:
                 subject, plain, html_body, mime_bytes, msg_id, msg_hash = render_n08_pre_arrival_message(
                     booking=booking_input,
                     reminder_type=job.reminder_type,
                     policy=policy,
                     attempt_id=attempt_id,
-                    action_url=None,  # Suppressed when external links not configured
+                    action_url=action_url,
                     mmb_enabled=self.mmb_enabled,
                     message_id=job.message_id,
                     message_date=clock.isoformat(),

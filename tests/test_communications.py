@@ -292,14 +292,15 @@ class CommunicationsRoutesTests(unittest.TestCase):
         self.assertTrue(result.success)
         self.assertEqual(result.template, "one_time_code")
 
-    def test_send_balance_reminder_route(self):
+    def test_send_balance_reminder_route_denied(self):
+        """Legacy route rejects balance_reminder template under Ticket N09 security policy."""
         req = SendEmailRequest(
             booking_intent_id=self.intent_id,
             template="balance_reminder",
         )
-        result = send_communication(request=req, store=self.store, email_service=self.email_svc)
-        self.assertTrue(result.success)
-        self.assertEqual(result.template, "balance_reminder")
+        with self.assertRaises(HTTPException) as ctx:
+            send_communication(request=req, store=self.store, email_service=self.email_svc)
+        self.assertEqual(ctx.exception.status_code, 403)
 
     def test_create_special_request_pending_review(self):
         req = SpecialRequestCreate(

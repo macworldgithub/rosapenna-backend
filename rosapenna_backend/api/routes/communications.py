@@ -74,9 +74,10 @@ def send_communication(
         )
 
     if request.template == "balance_reminder":
-        return email_service.send_balance_reminder(
-            booking=booking,
-            recipient_override=recipient_email,
+        raise HTTPException(
+            status_code=403,
+            detail="Balance reminder delivery via legacy communications route is disabled. Use authorized N08 pre-arrival scheduling.",
+            headers={"Cache-Control": "no-store"},
         )
 
     raise HTTPException(status_code=400, detail=f"Unsupported email template: {request.template}")

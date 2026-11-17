@@ -85,6 +85,7 @@ class BookingLinkageService:
         brs_rounds: List[BrsRoundDetails],
         payments: List[PaymentLedgerEntry],
         exclude_booking_ref: Optional[str] = None,
+        accepted_financials: Optional[Dict[str, Any]] = None,
     ) -> Tuple[LinkageStatus, List[str], Dict[str, Any]]:
         """Reconcile all components, identify discrepancies, and calculate ledger financials."""
         discrepancies: List[str] = []
@@ -118,12 +119,23 @@ class BookingLinkageService:
 
         # 3. Payment ledger reconciliation
         completed_payments = [p for p in payments if p.status == "completed"]
-        room_total = Decimal(opera_stay.total_amount) if opera_stay else Decimal("0.00")
-        golf_total = sum((Decimal(r.price) for r in brs_rounds), Decimal("0.00"))
-        total_price = room_total + golf_total
-        deposit_paid = sum((Decimal(p.amount) for p in completed_payments if p.payment_type != "credit"), Decimal("0.00"))
+        currency = "EUR"
+        if accepted_financials and accepted_financials.get("accepted_total"):
+            total_price = Decimal(str(accepted_financials["accepted_total"]))
+            currency = accepted_financials.get("currency", "EUR")
+        else:
+            room_total = Decimal(opera_stay.total_amount) if opera_stay else Decimal("0.00")
+            golf_total = sum((Decimal(r.price) for r in brs_rounds), Decimal("0.00"))
+            total_price = room_total + golf_total
+
+        deposit_paid = sum((Decimal(p.amount) for p in completed_payments if p.payment_type == "deposit"), Decimal("0.00"))
+        balance_paid = sum((Decimal(p.amount) for p in completed_payments if p.payment_type == "balance"), Decimal("0.00"))
+        other_paid = sum((Decimal(p.amount) for p in completed_payments if p.payment_type in ("full", "amendment_balance")), Decimal("0.00"))
         credit_amount = sum((Decimal(p.amount) for p in completed_payments if p.payment_type == "credit"), Decimal("0.00"))
-        balance_due = max(Decimal("0.00"), total_price - deposit_paid)
+        verified_paid_total = deposit_paid + balance_paid + other_paid
+        display_deposit_paid = deposit_paid if (deposit_paid > 0 or balance_paid > 0) else (deposit_paid + other_paid)
+        balance_due = max(Decimal("0.00"), total_price - verified_paid_total)
+        overpayment = max(Decimal("0.00"), verified_paid_total - total_price)
 
         if not completed_payments:
             discrepancies.append("No verified completed payment found in ledger")
@@ -173,12 +185,15 @@ class BookingLinkageService:
 
         financials = {
             "total_amount": format(total_price.quantize(Decimal("0.01")), ".2f"),
-            "deposit_paid": format(deposit_paid.quantize(Decimal("0.01")), ".2f"),
+            "deposit_paid": format(display_deposit_paid.quantize(Decimal("0.01")), ".2f"),
+            "balance_paid": format(balance_paid.quantize(Decimal("0.01")), ".2f"),
+            "verified_paid_total": format(verified_paid_total.quantize(Decimal("0.01")), ".2f"),
             "credit_amount": format(credit_amount.quantize(Decimal("0.01")), ".2f"),
             "balance_due": format(balance_due.quantize(Decimal("0.01")), ".2f"),
-            "currency": "EUR",
+            "overpayment": format(overpayment.quantize(Decimal("0.01")), ".2f"),
+            "currency": currency,
             "payment_status": "fully_paid" if balance_due == 0 and total_price > 0 else (
-                "deposit_paid" if deposit_paid > 0 else "unpaid"
+                "deposit_paid" if verified_paid_total > 0 else "unpaid"
             ),
         }
 
@@ -280,6 +295,10 @@ class BookingLinkageService:
             "brs_rounds": [r.model_dump(mode="json") for r in request.brs_rounds],
             "payments": [p.model_dump(mode="json") for p in request.payments],
             "financials": financials,
+            "accepted_financials": None,
+            "ledger_version": 1,
+            "revision": 1,
+            "active_balance_request": None,
             "created_at": now,
             "updated_at": now,
             "audit_trail": [audit_entry.model_dump(mode="json")],
@@ -351,6 +370,7 @@ class BookingLinkageService:
             brs_rounds=brs_rounds,
             payments=payments,
             exclude_booking_ref=booking_reference,
+            accepted_financials=existing.get("accepted_financials"),
         )
 
         after_state = {
@@ -564,86 +584,131 @@ class BookingLinkageService:
         booking_reference: str,
         payment: PaymentLedgerEntry,
         actor: str = "prommt_webhook",
+        expected_ledger_version: Optional[int] = None,
+        max_retries: int = 3,
     ) -> BookingLinkageResponse:
-        """Record or update a verified payment transaction in the booking ledger (Ticket F11).
+        """Record or update a verified payment transaction in the booking ledger (Ticket F11 / N09).
 
         Enforces:
         - AC 3: Correlates link, amount, currency, and provider reference before recording.
         - AC 4: Idempotent: duplicate or out-of-order events cannot credit twice.
         - AC 5: Non-completed payments (pending, failed, refunded) do not inflate deposit_paid.
         - AC 6: Zero card details stored.
+        - Monotonic status: late pending/failed events cannot regress a completed payment.
+        - Bounded CAS retry on ledger_version prevents concurrent write loss.
         """
         if self.collection is None:
             raise LinkageNotFoundError("Storage is not configured.")
 
         clean_ref = booking_reference.strip().upper()
-        doc = self.collection.find_one({"booking_reference": clean_ref})
-        if doc is None:
-            raise LinkageNotFoundError(f"Booking reference '{booking_reference}' was not found.")
 
-        now = _utc_now()
-        existing_payments = doc.get("payments", [])
+        for attempt in range(max_retries):
+            doc = self.collection.find_one({"booking_reference": clean_ref})
+            if doc is None:
+                raise LinkageNotFoundError(f"Booking reference '{booking_reference}' was not found.")
 
-        # Idempotency check: if payment_id already exists with same status, return early
-        existing_idx = next(
-            (i for i, p in enumerate(existing_payments) if p.get("payment_id") == payment.payment_id),
-            None,
-        )
+            current_ledger_version = doc.get("ledger_version", 1)
+            if expected_ledger_version is not None and attempt == 0:
+                if current_ledger_version != expected_ledger_version:
+                    raise LinkageConflictError(
+                        f"Ledger version conflict for {clean_ref}: expected {expected_ledger_version}, found {current_ledger_version}"
+                    )
 
-        if existing_idx is not None:
-            existing_p = existing_payments[existing_idx]
-            if existing_p.get("status") == "completed" and payment.status == "completed":
-                logger.info(
-                    "Payment %s for booking %s is already completed in ledger; idempotent return",
-                    payment.payment_id,
-                    clean_ref,
-                )
-                return BookingLinkageResponse(**doc)
-            existing_payments[existing_idx] = payment.model_dump(mode="json")
-        else:
-            existing_payments.append(payment.model_dump(mode="json"))
+            now = _utc_now()
+            existing_payments = list(doc.get("payments", []))
 
-        updated_payment_models = [PaymentLedgerEntry(**p) for p in existing_payments]
+            # Idempotency and Monotonicity check
+            existing_idx = next(
+                (i for i, p in enumerate(existing_payments) if p.get("payment_id") == payment.payment_id),
+                None,
+            )
 
-        lead_guest = LeadGuestContact(**doc["lead_guest"])
-        opera_stay = OperaStayDetails(**doc["opera_stay"]) if doc.get("opera_stay") else None
-        brs_rounds = [BrsRoundDetails(**r) for r in doc.get("brs_rounds", [])]
+            if existing_idx is not None:
+                existing_p = existing_payments[existing_idx]
+                if existing_p.get("status") == "completed":
+                    if payment.status == "completed":
+                        logger.info(
+                            "Payment %s for booking %s is already completed in ledger; idempotent return",
+                            payment.payment_id,
+                            clean_ref,
+                        )
+                        return BookingLinkageResponse(**doc)
+                    else:
+                        logger.warning(
+                            "Ignoring status downgrade from completed to %s for payment %s on booking %s",
+                            payment.status,
+                            payment.payment_id,
+                            clean_ref,
+                        )
+                        return BookingLinkageResponse(**doc)
+                existing_payments[existing_idx] = payment.model_dump(mode="json")
+            else:
+                existing_payments.append(payment.model_dump(mode="json"))
 
-        status, discrepancies, financials = self._reconcile_components(
-            lead_guest=lead_guest,
-            opera_stay=opera_stay,
-            brs_rounds=brs_rounds,
-            payments=updated_payment_models,
-            exclude_booking_ref=clean_ref,
-        )
+            updated_payment_models = [PaymentLedgerEntry(**p) for p in existing_payments]
 
-        audit_entry = LinkageAuditTrailEntry(
-            audit_id=f"aud_{uuid.uuid4().hex[:12]}",
-            actor=actor,
-            action="payment_recorded",
-            occurred_at=now,
-            reason=f"Recorded {payment.payment_type} payment of {payment.currency} {payment.amount} (status: {payment.status})",
-            before_state={"financials": doc.get("financials"), "payments_count": len(existing_payments)},
-            after_state={"financials": financials, "payments_count": len(updated_payment_models)},
-        )
+            lead_guest = LeadGuestContact(**doc["lead_guest"])
+            opera_stay = OperaStayDetails(**doc["opera_stay"]) if doc.get("opera_stay") else None
+            brs_rounds = [BrsRoundDetails(**r) for r in doc.get("brs_rounds", [])]
 
-        self.collection.update_one(
-            {"booking_reference": clean_ref},
-            {
-                "$set": {
-                    "payments": [p.model_dump(mode="json") for p in updated_payment_models],
-                    "financials": financials,
-                    "status": status,
-                    "discrepancies": discrepancies,
-                    "updated_at": now,
+            status, discrepancies, financials = self._reconcile_components(
+                lead_guest=lead_guest,
+                opera_stay=opera_stay,
+                brs_rounds=brs_rounds,
+                payments=updated_payment_models,
+                exclude_booking_ref=clean_ref,
+                accepted_financials=doc.get("accepted_financials"),
+            )
+
+            next_ledger_version = current_ledger_version + 1
+
+            audit_entry = LinkageAuditTrailEntry(
+                audit_id=f"aud_{uuid.uuid4().hex[:12]}",
+                actor=actor,
+                action="payment_recorded",
+                occurred_at=now,
+                reason=f"Recorded {payment.payment_type} payment of {payment.currency} {payment.amount} (status: {payment.status}, ledger_v: {next_ledger_version})",
+                before_state={
+                    "financials": doc.get("financials"),
+                    "payments_count": len(doc.get("payments", [])),
+                    "ledger_version": current_ledger_version,
                 },
-                "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
-            },
-        )
+                after_state={
+                    "financials": financials,
+                    "payments_count": len(updated_payment_models),
+                    "ledger_version": next_ledger_version,
+                },
+            )
 
-        updated_doc = self.collection.find_one({"booking_reference": clean_ref})
-        assert updated_doc is not None
-        return BookingLinkageResponse(**updated_doc)
+            cas_filter: Dict[str, Any] = {
+                "booking_reference": clean_ref,
+            }
+            if current_ledger_version == 1:
+                cas_filter["$or"] = [{"ledger_version": 1}, {"ledger_version": {"$exists": False}}]
+            else:
+                cas_filter["ledger_version"] = current_ledger_version
+
+            res = self.collection.update_one(
+                cas_filter,
+                {
+                    "$set": {
+                        "payments": [p.model_dump(mode="json") for p in updated_payment_models],
+                        "financials": financials,
+                        "status": status,
+                        "discrepancies": discrepancies,
+                        "ledger_version": next_ledger_version,
+                        "updated_at": now,
+                    },
+                    "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
+                },
+            )
+
+            if res.modified_count > 0:
+                updated_doc = self.collection.find_one({"booking_reference": clean_ref})
+                assert updated_doc is not None
+                return BookingLinkageResponse(**updated_doc)
+
+        raise LinkageConflictError(f"Concurrent update conflict on booking {clean_ref} after {max_retries} attempts")
 
     def record_credit(
         self,

@@ -124,6 +124,47 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("BOOKING_PRE_ARRIVAL_STAFF_API_ENABLED", "PRE_ARRIVAL_STAFF_API_ENABLED"),
     )
 
+    balance_payments_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENTS_ENABLED", "BALANCE_PAYMENTS_ENABLED"),
+    )
+    balance_payment_mode: str = Field(
+        default="disabled",
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_MODE", "BALANCE_PAYMENT_MODE"),
+    )
+    balance_staff_api_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_BALANCE_STAFF_API_ENABLED", "BALANCE_STAFF_API_ENABLED"),
+    )
+    balance_provider_ingress_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PROVIDER_INGRESS_ENABLED", "BALANCE_PROVIDER_INGRESS_ENABLED"),
+    )
+    balance_payment_policy_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_POLICY_ID", "BALANCE_PAYMENT_POLICY_ID"),
+    )
+    balance_payment_policy_version: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_POLICY_VERSION", "BALANCE_PAYMENT_POLICY_VERSION"),
+    )
+    balance_payment_test_run_id: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_TEST_RUN_ID", "BALANCE_PAYMENT_TEST_RUN_ID"),
+    )
+    balance_payment_recording_dir: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_RECORDING_DIR", "BALANCE_PAYMENT_RECORDING_DIR"),
+    )
+    balance_payment_signing_secret: Optional[str] = Field(
+        default=None,
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_SIGNING_SECRET", "BALANCE_PAYMENT_SIGNING_SECRET"),
+    )
+    balance_payment_property_id: str = Field(
+        default="ROSA",
+        validation_alias=AliasChoices("BOOKING_BALANCE_PAYMENT_PROPERTY_ID", "BALANCE_PAYMENT_PROPERTY_ID"),
+    )
+
 def validate_security_settings():
     """Reject unsafe production defaults before serving requests."""
     import os
@@ -192,6 +233,22 @@ def validate_security_settings():
         raise RuntimeError("BOOKING_PRE_ARRIVAL_STAFF_API_ENABLED requires pre_arrival_mode to be 'recording'")
     if settings.pre_arrival_staff_api_enabled and environment != "test":
         raise RuntimeError("N08 staff pre-arrival routes are allowed only in test")
+
+    balance_payment_mode = settings.balance_payment_mode.strip().lower()
+    if balance_payment_mode not in {"disabled", "simulation"}:
+        raise RuntimeError("BOOKING_BALANCE_PAYMENT_MODE must be 'disabled' or 'simulation'")
+
+    if balance_payment_mode == "simulation":
+        if environment in {"staging", "production"}:
+            raise RuntimeError("Simulation balance payment mode is forbidden in staging or production")
+        if not settings.balance_payments_enabled:
+            raise RuntimeError("Simulation balance mode requires BOOKING_BALANCE_PAYMENTS_ENABLED=true")
+
+    if settings.balance_staff_api_enabled and environment in {"staging", "production"}:
+        raise RuntimeError("N09 staff balance payment routes are forbidden in staging or production")
+
+    if settings.balance_provider_ingress_enabled:
+        raise RuntimeError("BOOKING_BALANCE_PROVIDER_INGRESS_ENABLED must remain false until verified contract is authorized")
 
     for live_flag in ("PROMMT_ALLOW_LIVE_CALLS", "OPERA_ALLOW_LIVE_WRITES", "BRS_ALLOW_LIVE_WRITES", "EMAIL_ALLOW_LIVE_SEND"):
         if os.getenv(live_flag, "").strip().lower() in {"true", "1", "yes"} and environment in {"development", "test"}:

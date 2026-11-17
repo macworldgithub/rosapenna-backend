@@ -175,6 +175,9 @@ class BookingLinkageResponse(BaseModel):
     brs_rounds: List[BrsRoundDetails] = Field(default_factory=list)
     payments: List[PaymentLedgerEntry] = Field(default_factory=list)
     financials: Dict[str, Any] = Field(default_factory=dict)
+    accepted_financials: Optional[Dict[str, Any]] = None
+    ledger_version: int = 1
+    active_balance_request: Optional[Dict[str, Any]] = None
     pending_requests: List[Dict[str, Any]] = Field(default_factory=list)
     revision: int = 1
     created_at: dt.datetime
