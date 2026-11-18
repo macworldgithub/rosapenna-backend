@@ -142,6 +142,7 @@ class PackageQuoteResponse(BaseModel):
     arrival_date: dt.date
     departure_date: dt.date
     nights: int
+    guest_count: Optional[int] = Field(default=None, ge=1)
     currency: str = "EUR"
     itemized_rooms: List[ItemizedRoomQuote] = Field(default_factory=list)
     itemized_golf: List[ItemizedGolfRoundQuote] = Field(default_factory=list)
@@ -335,6 +336,15 @@ class PackageSearchResponse(BaseModel):
     created_at: str
 
 
+class PackageGuestName(BaseModel):
+    """Name of a guest other than the lead booking contact."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    first_name: str = Field(min_length=1, max_length=100)
+    last_name: str = Field(min_length=1, max_length=100)
+
+
 class PackagePaymentLinkRequest(BaseModel):
     """Request to create a scoped 25% deposit payment link bound to quote and guest."""
 
@@ -345,6 +355,7 @@ class PackagePaymentLinkRequest(BaseModel):
     lead_last_name: str = Field(min_length=1, max_length=100)
     lead_email: str = Field(min_length=3, max_length=254)
     lead_phone: str = Field(min_length=6, max_length=40)
+    additional_guests: List[PackageGuestName] = Field(default_factory=list, max_length=299)
     residence_country: str = Field(default="IE", min_length=2, max_length=10)
     accepted_terms: bool = Field(strict=True)
     special_requests: Optional[str] = Field(default=None, max_length=500)

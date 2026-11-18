@@ -42,8 +42,8 @@ class TestRevisedConfirmationsM15(unittest.TestCase):
         self.mongo_client = MongoClient()
         self.db = self.mongo_client["rosapenna_test"]
         self.linkage_service = BookingLinkageService(database=self.db)
-        self.smtp_settings = SmtpSettings(allow_live_send=False, mmb_enabled=True)
-        self.email_service = EmailDeliveryService(settings=self.smtp_settings)
+        self.smtp_settings = SmtpSettings(allow_live_send=False)
+        self.email_service = EmailDeliveryService(settings=self.smtp_settings, mmb_gate=MmbGateService(database=self.db))
         self.revised_service = RevisedConfirmationService(
             database=self.db,
             linkage_service=self.linkage_service,

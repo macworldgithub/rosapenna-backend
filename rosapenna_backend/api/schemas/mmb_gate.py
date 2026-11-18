@@ -36,7 +36,7 @@ class StaffMmbGateUpdateRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
-    enabled: bool = Field(description="Target gate state: True to enable, False to disable.")
+    enabled: bool = Field(strict=True, description="Target gate state: True to enable, False to disable.")
     written_request_reference: str = Field(
         min_length=5,
         max_length=100,

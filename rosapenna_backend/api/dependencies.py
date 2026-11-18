@@ -116,7 +116,7 @@ def get_package_pricing_service(request: Request) -> PackagePricingService:
 def get_email_delivery_service(request: Request) -> EmailDeliveryService:
     service = getattr(request.app.state, "email_delivery_service", None)
     if service is None:
-        service = EmailDeliveryService()
+        service = EmailDeliveryService(mmb_gate=get_mmb_gate_service(request))
         request.app.state.email_delivery_service = service
     return service
 
@@ -431,8 +431,12 @@ def get_pre_arrival_service(request: Request):
             transport=transport,
             environment=getattr(app_settings, "environment", "test").strip().lower(),
             test_run_id=getattr(app_settings, "pre_arrival_test_run_id", None),
-            mmb_enabled=getattr(app_settings, "mmb_enabled", False),
+            mmb_gate=get_mmb_gate_service(request),
         )
+        bal_svc = getattr(request.app.state, "balance_payment_service", None)
+        if bal_svc is not None:
+            service.balance_service = bal_svc
+            bal_svc.pre_arrival_service = service
         request.app.state.pre_arrival_service = service
     return service
 
@@ -453,7 +457,9 @@ def get_balance_payment_service(request: Request):
         mode = getattr(app_settings, "balance_payment_mode", "disabled").strip().lower()
 
         if mode == "simulation":
-            secret = getattr(app_settings, "balance_payment_signing_secret", None) or "synthetic-test-signing-secret-key-32b"
+            secret = getattr(app_settings, "balance_payment_signing_secret", None)
+            if not secret or not getattr(app_settings, "balance_payment_test_run_id", None):
+                raise RuntimeError("Balance simulation requires an explicit signing secret and test run")
             gateway = LocalBalanceGateway(
                 signing_secret=secret,
                 environment=getattr(app_settings, "environment", "test").strip().lower(),
@@ -475,6 +481,9 @@ def get_balance_payment_service(request: Request):
             property_id=getattr(app_settings, "balance_payment_property_id", "ROSA"),
             test_run_id=getattr(app_settings, "balance_payment_test_run_id", None),
         )
+        if pre_arrival is not None:
+            pre_arrival.balance_service = service
+            service.pre_arrival_service = pre_arrival
         request.app.state.balance_payment_service = service
     return service
 

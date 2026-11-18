@@ -14,15 +14,18 @@ from rosapenna_backend.api.dependencies import get_balance_payment_service, get_
 from rosapenna_backend.api.schemas.balance_payments import (
     DevSimulateBalancePaymentRequest,
 )
+from rosapenna_backend.api.staff_security import StaffPrincipal, require_staff_roles
 from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.payments.balance_gateway import LocalBalanceGateway
 from rosapenna_backend.services.balance_payments import (
     BalanceEvidenceTamperedError,
     BalanceNotFoundError,
+    BalancePaymentError,
     BalancePaymentService,
 )
 
 router = APIRouter(tags=["Balance Payment Events"])
+SIMULATOR_ROLES = require_staff_roles("staff_operator", "developer", "admin", "reservations", "finance", "manager")
 
 
 @router.post(
@@ -58,6 +61,7 @@ def simulate_balance_payment_event(
     payment_id: str,
     payload: DevSimulateBalancePaymentRequest,
     response: Response,
+    principal: StaffPrincipal = Depends(SIMULATOR_ROLES),
     settings: Settings = Depends(get_settings),
     service: BalancePaymentService = Depends(get_balance_payment_service),
 ) -> Dict[str, Any]:
@@ -88,6 +92,18 @@ def simulate_balance_payment_event(
     from rosapenna_backend.api.schemas.balance_payments import BalancePaymentRequestDoc
     req_doc.pop("_id", None)
     req_obj = BalancePaymentRequestDoc(**req_doc)
+
+    server_run_id = settings.balance_payment_test_run_id
+    if (not payload.test_run_id or payload.test_run_id != server_run_id or payload.test_run_id != req_obj.test_run_id
+            or not req_obj.is_test or req_obj.environment != env
+            or req_obj.property_id != settings.balance_payment_property_id
+            or f"booking:{req_obj.booking_reference}:simulate" not in principal.scopes
+            or f"run:{server_run_id}:balance" not in principal.scopes):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Test run ID mismatch or unauthorized cross-run simulator execution",
+            headers={"Cache-Control": "no-store"},
+        )
 
     raw_bytes, sig, evidence = service.gateway.generate_simulated_event(
         payment_request=req_obj,

@@ -18,6 +18,7 @@ from decimal import Decimal
 import json
 import unittest
 import uuid
+import secrets
 
 from mongomock import MongoClient
 
@@ -94,7 +95,7 @@ class TestBalancePaymentsApi(unittest.TestCase):
     """Test FastAPI balance payments routes, authentication, and headers."""
 
     def setUp(self):
-        self.staff_token = "secret-staff-test-token-valid-12345"
+        self.staff_token = secrets.token_hex(24)
         self.test_run_id = f"test-api-{uuid.uuid4().hex[:8]}"
 
         # Configure global settings
@@ -106,7 +107,7 @@ class TestBalancePaymentsApi(unittest.TestCase):
         settings.balance_staff_api_enabled = True
         settings.balance_provider_ingress_enabled = False
         settings.balance_payment_test_run_id = self.test_run_id
-        settings.balance_payment_signing_secret = "synthetic-test-signing-secret-key-32b"
+        settings.balance_payment_signing_secret = secrets.token_hex(32)
         settings.balance_payment_property_id = "ROSA"
 
         self.app = create_app()
@@ -190,10 +191,21 @@ class TestBalancePaymentsApi(unittest.TestCase):
 
     def tearDown(self):
         self.mongo.close()
+        self.app.dependency_overrides.clear()
+
+    def allow_test_principal(self):
+        from rosapenna_backend.api.staff_security import StaffPrincipal
+        from rosapenna_backend.api.routes.balance_payments import STAFF_ROLES
+        from rosapenna_backend.api.routes.balance_payment_events import SIMULATOR_ROLES
+        scopes = {f"booking:{self.booking_ref}:{action}" for action in ("read", "request", "simulate", "reconcile")}
+        scopes.update({f"run:{self.test_run_id}:balance", "staff:balance:attention"})
+        principal = StaffPrincipal("test", "operator", frozenset({"finance"}), frozenset(scopes))
+        self.app.dependency_overrides[STAFF_ROLES] = lambda: principal
+        self.app.dependency_overrides[SIMULATOR_ROLES] = lambda: principal
 
     def test_staff_summary_unauthorized_and_authorized(self):
-        """Staff balance summary requires valid X-Staff-Token and returns no-store header."""
-        # Unauthorized
+        """Staff balance summary requires valid X-Staff-Token and exact scopes, returning no-store header."""
+        # Unauthorized (no token)
         status, headers, body = asgi_request(
             self.app,
             "GET",
@@ -201,8 +213,25 @@ class TestBalancePaymentsApi(unittest.TestCase):
         )
         self.assertEqual(status, 401)
 
-        # Authorized
-        req_headers = {"X-Staff-Token": self.staff_token}
+        # Unscoped token returns 403 Forbidden
+        status, headers, body = asgi_request(
+            self.app,
+            "GET",
+            f"/staff/balance-payments/bookings/{self.booking_ref}",
+            headers={"X-Staff-Token": self.staff_token},
+        )
+        self.assertEqual(status, 403)
+
+        # A client cannot grant itself permission through a header.
+        status, _, _ = asgi_request(self.app, "GET", f"/staff/balance-payments/bookings/{self.booking_ref}", headers={"X-Staff-Token": self.staff_token, "X-Staff-Scope": f"booking:{self.booking_ref}:read,run:{self.test_run_id}:balance"})
+        self.assertEqual(status, 403)
+        self.allow_test_principal()
+
+        # Authorized with exact booking and run scopes
+        req_headers = {
+            "X-Staff-Token": self.staff_token,
+            "X-Staff-Scope": f"booking:{self.booking_ref}:read,run:{self.test_run_id}:balance",
+        }
         status, headers, body = asgi_request(
             self.app,
             "GET",
@@ -220,8 +249,10 @@ class TestBalancePaymentsApi(unittest.TestCase):
 
     def test_staff_request_creation_and_dev_simulation_flow(self):
         """Full lifecycle: create request via staff endpoint, then simulate payment event."""
+        self.allow_test_principal()
         req_headers = {
             "X-Staff-Token": self.staff_token,
+            "X-Staff-Scope": f"booking:{self.booking_ref}:request,run:{self.test_run_id}:balance",
             "Content-Type": "application/json",
         }
         create_payload = json.dumps({
@@ -251,11 +282,16 @@ class TestBalancePaymentsApi(unittest.TestCase):
             "test_run_id": self.test_run_id,
         }).encode("utf-8")
 
+        sim_headers = {
+            "Content-Type": "application/json",
+            "X-Staff-Token": self.staff_token,
+            "X-Staff-Scope": f"booking:{self.booking_ref}:simulate,run:{self.test_run_id}:balance",
+        }
         status, headers, body = asgi_request(
             self.app,
             "POST",
             f"/dev/balance-payments/{payment_id}/simulate",
-            headers={"Content-Type": "application/json"},
+            headers=sim_headers,
             body=sim_payload,
         )
         self.assertEqual(status, 200)
@@ -280,7 +316,11 @@ class TestBalancePaymentsApi(unittest.TestCase):
 
     def test_staff_attention_endpoint(self):
         """GET /staff/balance-payments/attention returns list with no-store header."""
-        req_headers = {"X-Staff-Token": self.staff_token}
+        self.allow_test_principal()
+        req_headers = {
+            "X-Staff-Token": self.staff_token,
+            "X-Staff-Scope": f"staff:balance:attention,run:{self.test_run_id}:balance",
+        }
         status, headers, body = asgi_request(
             self.app,
             "GET",

@@ -45,12 +45,13 @@ from rosapenna_backend.api.schemas.booking_operations import (
 from rosapenna_backend.api.schemas.brs_booking import CreateBrsRoundRequest
 from rosapenna_backend.integrations.opera.schemas import CreateReservationRequest, RoomOccupant, UpdateReservationRequest
 from rosapenna_backend.api.schemas.mmb_amendments import AmendmentOfferSnapshot
-from rosapenna_backend.api.schemas.packages import PackageQuoteResponse
+from rosapenna_backend.api.schemas.packages import PackageGuestName, PackageQuoteResponse
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient, BrsWriteError
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegrationError
 from rosapenna_backend.services.booking_linkage import BookingLinkageService, LinkageConflictError
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
+from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.package_pricing import PackagePricingService, compute_quote_hash
 
 
@@ -85,7 +86,7 @@ class BookingOperationEngine:
         self.linkage_service = linkage_service or BookingLinkageService()
         self.opera_client = opera_client or OperaClient()
         self.brs_client = brs_client or BrsBookingClient()
-        self.email_service = email_service or EmailDeliveryService()
+        self.email_service = email_service or EmailDeliveryService(mmb_gate=MmbGateService(database=database))
         self.amendment_service = amendment_service
         self.occupants_service = occupants_service
         self.database = database
@@ -427,6 +428,19 @@ class BookingOperationEngine:
                 payment_doc=payment_doc,
             )
 
+        try:
+            unassigned_guests = [
+                PackageGuestName.model_validate(guest)
+                for guest in payment_doc.get("additional_guests", [])
+            ]
+        except (TypeError, ValueError):
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="guest_roster_validation",
+                reason="The saved guest list is invalid.",
+                payment_doc=payment_doc,
+            )
+
         room_items = getattr(quote, "itemized_rooms", [])
         total_rooms_requested = sum(r.room_quantity for r in room_items) if room_items else 1
         if total_rooms_requested > 1:
@@ -644,7 +658,11 @@ class BookingOperationEngine:
                 reason=f"Confirmed online stay & play via operation {record.operation_id}",
             )
             # F14 Safe Operation Engine establishes authoritative linkage
-            self.linkage_service.link_booking(link_req, actor="safe_booking_operation_engine")
+            self.linkage_service.link_booking(
+                link_req,
+                actor="safe_booking_operation_engine",
+                unassigned_guests=unassigned_guests,
+            )
         except Exception as exc:
             logger.error("Authoritative linkage failed for %s: %s", record.booking_reference, exc)
             return self._fail_to_reconciliation(

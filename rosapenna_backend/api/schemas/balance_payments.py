@@ -204,7 +204,7 @@ class PaymentEvidenceReceiptDoc(BaseModel):
     verified_at: dt.datetime
     evidence_source: str
     raw_event_hash: str = Field(min_length=16, max_length=64)
-    state: Literal["received", "applied", "quarantined"]
+    state: Literal["received", "applied", "quarantined", "reconciliation_required"]
     is_test: bool = True
     test_run_id: Optional[str] = None
     created_at: dt.datetime

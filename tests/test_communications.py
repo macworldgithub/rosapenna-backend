@@ -27,6 +27,7 @@ from rosapenna_backend.api.schemas.communications import (
 )
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.email_delivery import EmailDeliveryService, SmtpSettings
+from rosapenna_backend.services.mmb_gate import GATE_DOCUMENT_ID, MmbGateService
 from rosapenna_backend.services.pdf_itinerary import build_itinerary_pdf
 
 
@@ -174,15 +175,17 @@ class EmailDeliveryServiceTests(unittest.TestCase):
         self.assertEqual(result.template, "balance_reminder")
 
     def test_mmb_gating_behavior(self):
-        # When MMB is disabled, MMB link is NOT included
-        svc_disabled = EmailDeliveryService(settings=SmtpSettings(allow_live_send=False, mmb_enabled=False))
-        conf_res = svc_disabled.send_booking_confirmation(self.sample_booking)
-        self.assertTrue(conf_res.success)
-
-        # When MMB is enabled, MMB link is active
-        svc_enabled = EmailDeliveryService(settings=SmtpSettings(allow_live_send=False, mmb_enabled=True))
-        conf_res_enabled = svc_enabled.send_booking_confirmation(self.sample_booking)
-        self.assertTrue(conf_res_enabled.success)
+        gate = MmbGateService(database=self.db)
+        service = EmailDeliveryService(settings=SmtpSettings(allow_live_send=True), mmb_gate=gate)
+        with patch.object(service, "_send_smtp_email") as send:
+            for stored, expected in (("false", False), (True, True), (False, False)):
+                with self.subTest(stored=stored):
+                    self.db.mmb_release_gate.update_one(
+                        {"_id": GATE_DOCUMENT_ID}, {"$set": {"enabled": stored}}, upsert=True,
+                    )
+                    self.assertIs(gate.get_public_status()["enabled"], expected)
+                    self.assertTrue(service.send_booking_confirmation(self.sample_booking).success)
+                    self.assertIs("manage-booking?ref=" in send.call_args.kwargs["html_body"], expected)
 
     @patch("smtplib.SMTP_SSL")
     def test_live_smtp_dispatch_ssl(self, mock_smtp_ssl_cls):

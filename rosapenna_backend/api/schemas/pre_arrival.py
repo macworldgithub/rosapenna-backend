@@ -108,16 +108,28 @@ class EligibleBookingInput(BaseModel):
             raise ValueError("departure_date must be after arrival_date")
         return self
 
-    def compute_eligibility_hash(self) -> str:
-        """Calculate deterministic SHA256 digest of relevant canonical eligibility facts."""
-        payload = (
-            f"{self.booking_id}|{self.revision}|{self.arrival_date.isoformat()}|"
-            f"{self.departure_date.isoformat()}|{self.confirmation_status.lower()}|"
-            f"{self.total_amount:.2f}|{self.verified_paid_total:.2f}|{self.balance_due:.2f}|"
-            f"{self.currency}|{int(self.is_cancelled)}|{int(self.has_discrepancy)}|"
-            f"{int(self.in_recovery)}|{int(self.rooming_completed)}|{int(self.caddy_completed)}|"
-            f"{self.ledger_version}"
-        )
+    def compute_eligibility_hash(self, reminder_type: Optional[str] = None) -> str:
+        """Calculate deterministic SHA256 digest of relevant canonical eligibility facts.
+
+        For rooming_and_caddy, financial amounts and ledger versions are excluded so that
+        subsequent balance payments do not trigger false same-revision fact conflicts.
+        """
+        if reminder_type == "rooming_and_caddy":
+            payload = (
+                f"{self.booking_id}|{self.revision}|{self.arrival_date.isoformat()}|"
+                f"{self.departure_date.isoformat()}|{self.confirmation_status.lower()}|"
+                f"{int(self.is_cancelled)}|{int(self.has_discrepancy)}|"
+                f"{int(self.in_recovery)}|{int(self.rooming_completed)}|{int(self.caddy_completed)}"
+            )
+        else:
+            payload = (
+                f"{self.booking_id}|{self.revision}|{self.arrival_date.isoformat()}|"
+                f"{self.departure_date.isoformat()}|{self.confirmation_status.lower()}|"
+                f"{self.total_amount:.2f}|{self.verified_paid_total:.2f}|{self.balance_due:.2f}|"
+                f"{self.currency}|{int(self.is_cancelled)}|{int(self.has_discrepancy)}|"
+                f"{int(self.in_recovery)}|{int(self.rooming_completed)}|{int(self.caddy_completed)}|"
+                f"{self.ledger_version}"
+            )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

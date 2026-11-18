@@ -27,7 +27,8 @@ def require_staff_roles(*required_roles: str):
         raise ValueError("A staff dependency must name one or more required roles")
 
     def dependency(
-        x_staff_token: Optional[str] = Header(default=None, alias="X-Staff-Token")
+        x_staff_token: Optional[str] = Header(default=None, alias="X-Staff-Token"),
+        x_staff_scope: Optional[str] = Header(default=None, alias="X-Staff-Scope"),
     ) -> StaffPrincipal:
         # Development mode bypass (if enabled by environment setting)
         if settings.environment.strip().lower() != "production" and settings.security_bypass_in_dev:
@@ -37,6 +38,7 @@ def require_staff_roles(*required_roles: str):
                 issuer="local_dev",
                 subject="developer",
                 roles=frozenset(required_roles),
+                scopes=frozenset(),
             )
 
         if not settings.staff_api_key:
@@ -57,6 +59,7 @@ def require_staff_roles(*required_roles: str):
             issuer="rosapenna_staff_auth",
             subject="staff_operator",
             roles=frozenset(required_roles),
+            scopes=frozenset(),
         )
 
     return dependency

@@ -84,7 +84,7 @@ def get_package_payment(
     payment = pricing_service.get_payment(payment_id)
     if not payment:
         raise HTTPException(status_code=404, detail=f"Payment link '{payment_id}' was not found.")
-    return payment
+    return {"status": payment["status"]}
 
 
 @router.post(

@@ -16,7 +16,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import html
 from typing import TYPE_CHECKING, Any, Dict, List, Literal, Optional
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 if TYPE_CHECKING:
     from rosapenna_backend.api.schemas.communications import (
@@ -33,6 +33,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from rosapenna_backend.api.schemas.communications import EmailDeliveryResult
 from rosapenna_backend.core.logging import logger
+from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.pdf_itinerary import build_itinerary_pdf
 
 
@@ -55,14 +56,14 @@ class SmtpSettings(BaseSettings):
     from_name: str = Field("Rosapenna Hotel & Golf Resort", validation_alias="EMAIL_FROM_NAME")
     hotel_reservations_email: str = Field("reservations@rosapenna.ie", validation_alias="EMAIL_HOTEL_RESERVATIONS")
     allow_live_send: bool = Field(False, validation_alias="EMAIL_ALLOW_LIVE_SEND")
-    mmb_enabled: bool = Field(False, validation_alias="MMB_ENABLED")
 
 
 class EmailDeliveryService:
     """Manages email templates, PDF attachment compilation, and SMTP delivery."""
 
-    def __init__(self, settings: Optional[SmtpSettings] = None):
+    def __init__(self, settings: Optional[SmtpSettings] = None, *, mmb_gate: Optional[MmbGateService] = None):
         self.settings = settings or SmtpSettings()
+        self.mmb_gate = mmb_gate or MmbGateService()
         # In-memory sandbox log for testing/inspection
         self._dispatched_emails: List[Dict[str, Any]] = []
         self._idempotency_records: Dict[str, EmailDeliveryResult] = {}
@@ -108,8 +109,8 @@ class EmailDeliveryService:
         # 2. Build email body
         mmb_section = (
             f"<p><b>Manage Your Booking:</b> You can view your itinerary online at "
-            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>rosapenna.ie/manage-booking</a>.</p>"
-            if self.settings.mmb_enabled
+            f"<a href='https://rosapenna.ie/manage-booking?ref={quote(str(ref), safe='')}'>rosapenna.ie/manage-booking</a>.</p>"
+            if self.mmb_gate.is_enabled()
             else "<p><b>Manage Your Booking:</b> Online self-service is currently in preparation. "
                  "To adjust your stay, contact Reservations at reservations@rosapenna.ie or call +353 (0)74 915 5301.</p>"
         )
@@ -277,8 +278,8 @@ Rosapenna Hotel & Golf Resort
         # 2. Build email body
         mmb_section = (
             f"<p><b>Manage Your Booking:</b> You can view your updated itinerary online at "
-            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>rosapenna.ie/manage-booking</a>.</p>"
-            if self.settings.mmb_enabled
+            f"<a href='https://rosapenna.ie/manage-booking?ref={quote(str(ref), safe='')}'>rosapenna.ie/manage-booking</a>.</p>"
+            if self.mmb_gate.is_enabled()
             else "<p><b>Manage Your Booking:</b> Online self-service is currently in preparation. "
                  "To adjust your stay, contact Reservations at reservations@rosapenna.ie or call +353 (0)74 915 5301.</p>"
         )
@@ -792,8 +793,8 @@ Rosapenna Reservations Team · reservations@rosapenna.ie
 
         mmb_payment_info = (
             f"<p>To settle your balance securely online, please visit "
-            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>Manage My Booking</a>.</p>"
-            if self.settings.mmb_enabled
+            f"<a href='https://rosapenna.ie/manage-booking?ref={quote(str(ref), safe='')}'>Manage My Booking</a>.</p>"
+            if self.mmb_gate.is_enabled()
             else "<p>To settle your remaining balance, please contact our Reservations team at "
                  "<a href='mailto:reservations@rosapenna.ie'>reservations@rosapenna.ie</a> or call +353 (0)74 915 5301.</p>"
         )
@@ -930,8 +931,8 @@ Please contact reservations@rosapenna.ie or call +353 (0)74 915 5301.
 
         mmb_info = (
             f"<p>To view your itinerary or manage requirements, please visit "
-            f"<a href='https://rosapenna.ie/manage-booking?ref={ref}'>Manage My Booking</a>.</p>"
-            if self.settings.mmb_enabled
+            f"<a href='https://rosapenna.ie/manage-booking?ref={quote(str(ref), safe='')}'>Manage My Booking</a>.</p>"
+            if self.mmb_gate.is_enabled()
             else "<p>To manage your booking, please contact our Reservations team at "
                  "<a href='mailto:reservations@rosapenna.ie'>reservations@rosapenna.ie</a> or call +353 (0)74 915 5301.</p>"
         )
@@ -1557,12 +1558,12 @@ def render_n08_pre_arrival_message(
             )
             safe_action_link_plain = f"\nComplete preferences online: {clean_url}\n"
     elif mmb_enabled:
-        mmb_url = f"https://rosapenna.ie/manage-booking?ref={html.escape(ref, quote=True)}"
+        mmb_url = f"https://rosapenna.ie/manage-booking?ref={quote(ref, safe='')}"
         safe_action_link_html = (
             f'<p>To view your itinerary or manage details, please visit '
             f'<a href="{mmb_url}">Manage My Booking</a>.</p>'
         )
-        safe_action_link_plain = f"\nManage booking: https://rosapenna.ie/manage-booking?ref={ref}\n"
+        safe_action_link_plain = f"\nManage booking: {mmb_url}\n"
     else:
         safe_action_link_html = (
             '<p>To discuss your booking or requirements, please contact our Reservations team at '

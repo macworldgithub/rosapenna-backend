@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 import secrets
+from collections import Counter
 from typing import Any, Dict, List, Optional
 from pymongo.database import Database
 
@@ -159,6 +160,18 @@ class MmbOccupantsService:
             room_category=stay.room_category,
         )
 
+        assigned_names = Counter(
+            (guest.first_name.casefold(), guest.last_name.casefold())
+            for guest in occupants if not guest.is_primary
+        )
+        unassigned_guests = []
+        for guest in booking.unassigned_guests:
+            name = (guest.first_name.casefold(), guest.last_name.casefold())
+            if assigned_names[name]:
+                assigned_names[name] -= 1
+            else:
+                unassigned_guests.append(guest)
+
         return OccupantRosterResponse(
             booking_reference=clean_ref,
             arrival_date=stay.arrival_date,
@@ -166,6 +179,7 @@ class MmbOccupantsService:
             room_quantity=stay.room_quantity,
             room_groups=room_groups,
             occupants=occupants,
+            unassigned_guests=unassigned_guests,
             sharing_preferences=sharing,
             version_hash=version_hash,
             revision=revision,

@@ -31,6 +31,7 @@ from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
+from rosapenna_backend.services.mmb_occupants import MmbOccupantsService
 from rosapenna_backend.services.package_pricing import PackagePricingService, compute_quote_hash
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
@@ -417,6 +418,7 @@ class TestN06CommitJourney(unittest.TestCase):
     def test_successful_commit_after_simulated_deposit(self):
         """End-to-end verified deposit, hotel write, golf write, linkage, and idempotency."""
         quote = make_mock_available_quote()
+        quote.guest_count = 2
         self.pricing_service._cache_and_return_quote(quote)
 
         link_resp = self.pricing_service.create_payment_link(
@@ -426,6 +428,7 @@ class TestN06CommitJourney(unittest.TestCase):
                 lead_last_name="Golfer",
                 lead_email="jane@example.com",
                 lead_phone="+353871234567",
+                additional_guests=[{"first_name": "Test", "last_name": "Companion"}],
                 accepted_terms=True,
             )
         )
@@ -472,6 +475,9 @@ class TestN06CommitJourney(unittest.TestCase):
         # Verify authoritative linkage
         linkage_doc = self.linkage.get_linkage(link_resp.booking_reference)
         self.assertIsNotNone(linkage_doc.opera_stay)
+        roster = MmbOccupantsService(linkage_service=self.linkage).get_roster(link_resp.booking_reference)
+        self.assertEqual([name.last_name for name in roster.unassigned_guests], ["Companion"])
+        self.assertEqual([guest.full_name for guest in roster.occupants], ["Jane Golfer"])
         self.assertEqual(len(linkage_doc.brs_rounds), 2)
         self.assertEqual(len(linkage_doc.payments), 1)
         self.assertEqual(linkage_doc.payments[0].amount, "285.00")

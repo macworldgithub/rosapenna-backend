@@ -7,6 +7,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, model_validator
+from rosapenna_backend.api.schemas.packages import PackageGuestName
 
 
 BedPreferenceType = Literal["TWIN", "DOUBLE", "SINGLE"]
@@ -118,6 +119,7 @@ class OccupantRosterResponse(BaseModel):
     room_quantity: int
     room_groups: List[BookedRoomGroupSummary]
     occupants: List[OccupantDetail]
+    unassigned_guests: List[PackageGuestName] = Field(default_factory=list)
     sharing_preferences: List[SharingPreference]
     unassigned_physical_room_notice: str = "Physical room numbers are assigned by hotel reception upon check-in. They are not assigned in advance."
     version_hash: str

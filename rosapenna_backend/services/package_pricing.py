@@ -76,6 +76,8 @@ def compute_quote_hash(quote: PackageQuoteResponse) -> str:
             for g in quote.itemized_golf
         ],
     }
+    if quote.guest_count is not None:
+        canonical["guest_count"] = quote.guest_count
     encoded = json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
@@ -585,7 +587,23 @@ class PackagePricingService:
                 required_rounds = rule.rounds
                 break
 
-        if len(request.golf_rounds) < required_rounds:
+        weekday_dates = [
+            day for offset in range(nights + 1)
+            if (day := request.arrival_date + dt.timedelta(days=offset)).weekday() < 5
+        ]
+        arrival_weekday = request.arrival_date.weekday()
+        if (nights == 2 and arrival_weekday >= 4) or (nights == 3 and arrival_weekday == 4):
+            required_rounds = 1
+        selected_dates = {round_request.date for round_request in request.golf_rounds}
+        golf_error = None
+        if not selected_dates.issubset(weekday_dates):
+            golf_error = "Choose golf on weekdays within your stay. Saturday and Sunday are rest days."
+        elif arrival_weekday >= 4 and weekday_dates and weekday_dates[0] not in selected_dates:
+            golf_error = f"Choose a tee time on {weekday_dates[0]}, the first golf day of your stay."
+        elif len(selected_dates) < required_rounds:
+            golf_error = f"Stays of {nights} nights require at least {required_rounds} golf rounds on separate days."
+
+        if golf_error:
             return self._cache_and_return_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
@@ -596,7 +614,7 @@ class PackagePricingService:
                     nights=nights,
                     balance_due_date=balance_due_date,
                     created_at=now_str,
-                    errors=[f"Stays of {nights} nights require at least {required_rounds} golf rounds (got {len(request.golf_rounds)})."],
+                    errors=[golf_error],
                 )
             )
 
@@ -760,6 +778,7 @@ class PackagePricingService:
                     day=round_req.date,
                     course_id=round_req.course_id,
                     players=needed_players,
+                    force_refresh=True,
                 )
             except Exception as exc:
                 return self._cache_and_return_quote(
@@ -780,17 +799,9 @@ class PackagePricingService:
                 s for s in brs_avail.slots
                 if s.time == round_req.time and getattr(s, "available_players", getattr(s, "available_capacity", 0)) >= round_req.players
             ]
-            if not matching_slots and brs_avail.slots:
-                # If exact minute is not found (e.g. 10:00 vs 10:10), select nearest available slot on that course/day
-                valid_slots = [
-                    s for s in brs_avail.slots
-                    if getattr(s, "available_players", getattr(s, "available_capacity", 0)) >= round_req.players
-                ]
-                if valid_slots:
-                    matching_slots = [valid_slots[0]]
-
             if not matching_slots:
-                err_detail = f"Tee time at {round_req.time} on {round_req.date} on {course_cfg['name']} does not have capacity for {round_req.players} players."
+                group = "1 player" if round_req.players == 1 else f"{round_req.players} players"
+                err_detail = f"{course_cfg['name']} at {round_req.time} on {round_req.date} is no longer available for {group}. Choose another tee time."
                 try:
                     sheet_res = self.teesheet_cache.get(round_req.date, round_req.course_id)
                     sheet_data = sheet_res.get("data", {})
@@ -929,6 +940,7 @@ class PackagePricingService:
             arrival_date=request.arrival_date,
             departure_date=request.departure_date,
             nights=nights,
+            guest_count=total_adults + total_children,
             currency="EUR",
             itemized_rooms=itemized_rooms,
             itemized_golf=itemized_golf,
@@ -998,6 +1010,11 @@ class PackagePricingService:
 
         if not request.accepted_terms:
             raise ValueError("Stay & Play terms and conditions must be explicitly accepted.")
+
+        if quote.guest_count is not None and len(request.additional_guests) != quote.guest_count - 1:
+            raise ValueError(f"Enter a first and last name for each of the {quote.guest_count} guests on the quote.")
+        if quote.guest_count is None and request.additional_guests:
+            raise ValueError("Refresh your package quote before adding guest details.")
 
         quote_hash = compute_quote_hash(quote)
         is_simulation = False
@@ -1139,6 +1156,9 @@ class PackagePricingService:
                 "is_test": False,
             }
 
+        payment_doc["additional_guests"] = [
+            guest.model_dump(mode="json") for guest in request.additional_guests
+        ]
         self._payments_cache[payment_id] = payment_doc
         if self.payments_collection is not None:
             self.payments_collection.insert_one(dict(payment_doc))

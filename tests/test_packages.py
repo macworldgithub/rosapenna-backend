@@ -10,6 +10,7 @@ from mongomock import MongoClient
 
 from rosapenna_backend.api.routes.packages import (
     calculate_package_quote,
+    get_package_payment,
     get_package_rules,
     update_package_rules,
 )
@@ -235,6 +236,45 @@ class PackagePricingServiceTests(unittest.TestCase):
         self.assertEqual(res.status, "unavailable")
         self.assertTrue(any("Insufficient inventory" in e for e in res.errors))
 
+    def test_weekend_stays_require_friday_or_monday_and_block_weekend_golf(self):
+        for arrival, golf_day in ((11, 11), (12, 14), (13, 14)):
+            with self.subTest(arrival=arrival):
+                arrival_date = dt.date(2027, 6, arrival)
+                checkout = arrival_date + dt.timedelta(days=2)
+                required_day = dt.date(2027, 6, golf_day)
+                round_request = GolfRoundQuoteRequest(course_id=1, date=required_day, time="09:30", players=2)
+                request = PackageQuoteRequest(
+                    arrival_date=arrival_date,
+                    departure_date=checkout,
+                    rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC")],
+                    golf_rounds=[round_request],
+                )
+                self.assertEqual(self.service.calculate_quote(request).status, "available")
+                weekend_round = round_request.model_copy(update={"date": dt.date(2027, 6, 12 + (arrival == 13))})
+                blocked = self.service.calculate_quote(request.model_copy(update={"golf_rounds": [weekend_round]}))
+                self.assertEqual(blocked.status, "ineligible")
+                self.assertIn("rest days", blocked.errors[0])
+                missing = self.service.calculate_quote(request.model_copy(update={"golf_rounds": []}))
+                self.assertIn(str(required_day), missing.errors[0])
+
+    def test_quote_requires_the_exact_tee_time_even_when_another_slot_is_open(self):
+        request = PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="10:00", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+        )
+
+        quote = self.service.calculate_quote(request)
+
+        self.assertEqual(quote.status, "unavailable")
+        self.assertIn("10:00", quote.errors[0])
+        self.assertEqual(quote.itemized_golf, [])
+        self.assertTrue(self.mock_cache.get_course_availability.call_args.kwargs["force_refresh"])
+
     def test_upstream_opera_error_returns_unavailable(self):
         """If Opera Cloud throws an integration error, pricing returns unavailable without crashing."""
         self.mock_opera.get_room_availability.side_effect = OperaIntegrationError("OHIP gateway timed out")
@@ -445,15 +485,16 @@ class PackageRouteHandlerTests(unittest.TestCase):
         req = PackageQuoteRequest(
             arrival_date=dt.date(2027, 6, 10),
             departure_date=dt.date(2027, 6, 12),
-            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1, adults=3)],
             golf_rounds=[
-                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
-                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=3),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=3),
             ],
         )
         quote = self.service.calculate_quote(req)
+        self.assertEqual(quote.guest_count, 3)
 
-        link_req = PackagePaymentLinkRequest(
+        lead_details = dict(
             quote_id=quote.quote_id,
             lead_first_name="Jane",
             lead_last_name="Doe",
@@ -461,7 +502,29 @@ class PackageRouteHandlerTests(unittest.TestCase):
             lead_phone="+353871234567",
             accepted_terms=True,
         )
+        guests = [
+            {"first_name": "  Second  ", "last_name": "Guest"},
+            {"first_name": "Third", "last_name": "Guest"},
+        ]
+        for wrong_count in ([], guests[:1], guests + [guests[0]]):
+            with self.subTest(count=len(wrong_count)), self.assertRaisesRegex(ValueError, "3 guests"):
+                self.service.create_payment_link(PackagePaymentLinkRequest(
+                    **lead_details, additional_guests=wrong_count,
+                ))
+        with self.assertRaises(ValueError):
+            PackagePaymentLinkRequest(**lead_details, additional_guests=[
+                guests[0], {"first_name": "Third", "last_name": " "},
+            ])
+        self.assertEqual(self.db.package_payments.count_documents({}), 0)
+        link_req = PackagePaymentLinkRequest(**lead_details, additional_guests=guests)
         link_res = self.service.create_payment_link(link_req)
+        stored = self.db.package_payments.find_one({"payment_id": link_res.payment_id})
+        self.assertEqual(stored["additional_guests"], [
+            {"first_name": "Second", "last_name": "Guest"},
+            guests[1],
+        ])
+        self.assertNotIn("additional_guests", link_res.model_dump())
+        self.assertEqual(get_package_payment(link_res.payment_id, self.service), {"status": "unpaid"})
 
         self.assertEqual(link_res.amount, quote.deposit_amount)
         self.assertEqual(link_res.currency, "EUR")

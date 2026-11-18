@@ -109,10 +109,12 @@ class BalancePaymentService:
             self.requests_col.create_index(
                 [("environment", ASCENDING), ("property_id", ASCENDING), ("idempotency_key", ASCENDING)],
                 unique=True,
+                partialFilterExpression={"purpose": "balance", "idempotency_key": {"$exists": True, "$type": "string"}},
                 name="uniq_bal_idempotency",
             )
             self.requests_col.create_index(
                 [("environment", ASCENDING), ("property_id", ASCENDING), ("booking_reference", ASCENDING), ("command_id", ASCENDING)],
+                partialFilterExpression={"purpose": "balance", "command_id": {"$exists": True, "$type": "string"}},
                 name="idx_bal_booking_command",
             )
 
@@ -218,6 +220,7 @@ class BalancePaymentService:
 
         # Resolve timing & policy
         policy = self._get_active_policy()
+        today_prop = clock.astimezone(ZoneInfo(policy.timezone if policy else "Europe/Dublin")).date()
         balance_due_date: Optional[dt.date] = None
         first_request_date: Optional[dt.date] = None
         arr_date: Optional[dt.date] = None
@@ -226,14 +229,22 @@ class BalancePaymentService:
             arr_date = dt.date.fromisoformat(stay["arrival_date"]) if isinstance(stay["arrival_date"], str) else stay["arrival_date"]
 
         blocked_reason: Optional[str] = None
-        if policy and arr_date:
+        if not policy:
+            blocked_reason = "MISSING_PRE_ARRIVAL_POLICY"
+        elif (
+            policy.approval_status != "approved"
+            or (policy.effective_from is not None and today_prop < policy.effective_from)
+            or (policy.effective_to is not None and today_prop > policy.effective_to)
+        ):
+            blocked_reason = "UNAPPROVED_OR_EXPIRED_POLICY"
+        elif arr_date:
             balance_due_date = arr_date - dt.timedelta(days=policy.balance_due_lead_days)
             if policy.balance_request_lead_days is not None:
                 first_request_date = arr_date - dt.timedelta(days=policy.balance_request_lead_days)
             else:
                 blocked_reason = "UNRESOLVED_BALANCE_TIMING"
-        elif not policy:
-            blocked_reason = "MISSING_PRE_ARRIVAL_POLICY"
+        else:
+            blocked_reason = "MISSING_ARRIVAL_DATE"
 
         # Determine active request state
         active_req = linkage_doc.get("active_balance_request") or {}
@@ -241,8 +252,6 @@ class BalancePaymentService:
         active_req_state = active_req.get("state")
 
         # Determine collection status
-        today_prop = clock.astimezone(ZoneInfo(policy.timezone if policy else "Europe/Dublin")).date()
-
         if balance_due == Decimal("0.00") and accepted_total > Decimal("0.00"):
             collection_status = "paid"
         elif active_req_state in ("unknown", "reconciliation_required"):
@@ -316,6 +325,13 @@ class BalancePaymentService:
                 f"Booking '{clean_ref}' balance is already settled (balance due: EUR {summary.balance_due})"
             )
 
+        linkage_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
+        if not linkage_doc:
+            raise BalanceNotFoundError(f"Booking reference '{clean_ref}' not found")
+
+        if summary.collection_status in ("blocked_dependency", "reconciliation_required") or not linkage_doc.get("accepted_financials"):
+            raise BalanceConflictError("Balance collection is blocked pending verified evidence or reconciliation")
+
         if summary.booking_revision != expected_booking_revision:
             raise BalanceConflictError(
                 f"Booking revision conflict for '{clean_ref}': expected {expected_booking_revision}, current is {summary.booking_revision}"
@@ -334,6 +350,13 @@ class BalancePaymentService:
             "command_id": command_id,
         })
         if existing_req_doc:
+            expiry = existing_req_doc.get("expires_at")
+            if isinstance(expiry, str):
+                expiry = dt.datetime.fromisoformat(expiry)
+            if expiry and expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=dt.timezone.utc)
+            if existing_req_doc.get("state") != "ready" or not expiry or expiry <= clock:
+                raise BalanceConflictError("The existing payment request needs reconciliation")
             if (
                 existing_req_doc.get("amount") == summary.balance_due
                 and existing_req_doc.get("currency") == summary.currency
@@ -344,14 +367,43 @@ class BalancePaymentService:
                 return BalancePaymentRequestDoc(**existing_req_doc)
             raise BalanceConflictError(f"Command ID '{command_id}' reused with conflicting balance parameters")
 
-        # Check if booking already has a ready active balance request for this exact amount and currency
-        if summary.active_request_id and summary.active_request_state in ("ready", "pending"):
-            active_doc = self.requests_col.find_one({"payment_id": summary.active_request_id})
-            if active_doc and active_doc.get("amount") == summary.balance_due and active_doc.get("currency") == summary.currency:
+        # Check if booking currently has an active request that is creating, unknown, pending, or reconciliation_required
+        if summary.active_request_id and summary.active_request_state in ("unknown", "creating", "pending", "reconciliation_required"):
+            active_doc = self.requests_col.find_one({"payment_id": summary.active_request_id}) if self.requests_col is not None else None
+            if active_doc:
                 active_doc.pop("_id", None)
                 return BalancePaymentRequestDoc(**active_doc)
+            raise BalanceConflictError("The active payment request needs reconciliation")
 
-        linkage_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
+        # Check if booking already has a ready active balance request for this exact amount and currency
+        if summary.active_request_id and summary.active_request_state == "ready":
+            active_doc = self.requests_col.find_one({"payment_id": summary.active_request_id}) if self.requests_col is not None else None
+            if (
+                active_doc
+                and active_doc.get("amount") == summary.balance_due
+                and active_doc.get("currency") == summary.currency
+            ):
+                raw_expires = active_doc.get("expires_at")
+                doc_expires = (
+                    dt.datetime.fromisoformat(raw_expires)
+                    if isinstance(raw_expires, str)
+                    else raw_expires
+                )
+                if doc_expires and doc_expires.tzinfo is None:
+                    doc_expires = doc_expires.replace(tzinfo=dt.timezone.utc)
+                if doc_expires and doc_expires > clock:
+                    active_doc.pop("_id", None)
+                    return BalancePaymentRequestDoc(**active_doc)
+                else:
+                    self.requests_col.update_one(
+                        {"payment_id": summary.active_request_id},
+                        {"$set": {"state": "expired", "updated_at": clock}},
+                    )
+                    self.linkages_col.update_one(
+                        {"booking_reference": clean_ref},
+                        {"$set": {"active_balance_request.state": "expired", "updated_at": clock}},
+                    )
+
         assert linkage_doc is not None
 
         lead = linkage_doc.get("lead_guest") or {}
@@ -364,7 +416,8 @@ class BalancePaymentService:
             else hashlib.sha256(f"{clean_ref}|{summary.accepted_total}|{summary.currency}".encode("utf-8")).hexdigest()
         )
 
-        idempotency_key = f"idemp_bal_{command_id}_{summary.ledger_version}"
+        idempotency_key = hashlib.sha256(f"{self.environment}|{prop}|{clean_ref}|{command_id}|{summary.ledger_version}".encode()).hexdigest()
+        generation = uuid.uuid4().hex
 
         # 1. Conditional reservation on booking document
         cas_filter: Dict[str, Any] = {
@@ -384,8 +437,6 @@ class BalancePaymentService:
                     "$or": [
                         {"active_balance_request": None},
                         {"active_balance_request": {"$exists": False}},
-                        {"active_balance_request.state": {"$in": ["failed", "expired", "superseded", "verified_paid"]}},
-                        {"active_balance_request.payment_id": summary.active_request_id},
                     ]
                 },
             ],
@@ -395,7 +446,7 @@ class BalancePaymentService:
             {
                 "$set": {
                     "active_balance_request": {
-                        "payment_id": "creating",
+                        "payment_id": generation,
                         "command_id": command_id,
                         "state": "creating",
                         "amount": summary.balance_due,
@@ -430,7 +481,7 @@ class BalancePaymentService:
         except BalanceGatewayTimeoutError as exc:
             logger.warning("Gateway timed out creating balance request for %s: %s", clean_ref, exc)
             self.linkages_col.update_one(
-                {"booking_reference": clean_ref},
+                {"booking_reference": clean_ref, "active_balance_request.payment_id": generation, "active_balance_request.state": "creating"},
                 {
                     "$set": {
                         "active_balance_request.state": "unknown",
@@ -443,10 +494,10 @@ class BalancePaymentService:
         except Exception as exc:
             logger.error("Gateway error creating balance request for %s: %s", clean_ref, exc)
             self.linkages_col.update_one(
-                {"booking_reference": clean_ref},
+                {"booking_reference": clean_ref, "active_balance_request.payment_id": generation, "active_balance_request.state": "creating"},
                 {
                     "$set": {
-                        "active_balance_request.state": "failed",
+                        "active_balance_request.state": "unknown",
                         "active_balance_request.reason": str(exc),
                         "updated_at": clock,
                     }
@@ -457,8 +508,12 @@ class BalancePaymentService:
         # 3. Persist request document and update booking active request state
         self.requests_col.insert_one(req_doc.model_dump(mode="json"))
 
-        self.linkages_col.update_one(
-            {"booking_reference": clean_ref},
+        completion = self.linkages_col.update_one(
+            {"booking_reference": clean_ref, "revision": expected_booking_revision,
+             "ledger_version": expected_ledger_version,
+             "active_balance_request.payment_id": generation,
+             "active_balance_request.command_id": command_id,
+             "active_balance_request.state": "creating"},
             {
                 "$set": {
                     "active_balance_request": {
@@ -475,6 +530,9 @@ class BalancePaymentService:
                 }
             },
         )
+        if completion.matched_count != 1:
+            self.requests_col.update_one({"payment_id": req_doc.payment_id}, {"$set": {"state": "unknown"}})
+            raise BalanceConflictError("Booking changed during request creation; reconcile before retry")
 
         logger.info(
             "Created bound balance request %s for booking %s (amount: %s %s, actor: %s)",
@@ -499,67 +557,172 @@ class BalancePaymentService:
         clock = now or _utc_now()
         clean_ref = evidence.booking_reference.strip().upper()
 
-        # 1. Receipt deduplication and tampering check
+        # 1. Receipt deduplication and crash recovery check
         existing_receipt = self.receipts_col.find_one({
             "environment": evidence.environment,
             "property_id": evidence.property_id,
             "event_id": evidence.event_id,
         })
         if existing_receipt:
-            if existing_receipt.get("raw_event_hash") == evidence.raw_event_hash:
-                logger.info("Idempotent replay of already verified receipt %s", evidence.event_id)
+            if existing_receipt.get("raw_event_hash") != evidence.raw_event_hash:
+                raise BalanceEvidenceTamperedError(
+                    f"Event ID '{evidence.event_id}' arrived with altered hash; possible replay tampering"
+                )
+            if existing_receipt.get("state") == "applied":
+                existing_receipt.pop("_id", None)
+                receipt_doc = PaymentEvidenceReceiptDoc(**existing_receipt)
+            elif existing_receipt.get("state") in ("quarantined", "reconciliation_required"):
                 existing_receipt.pop("_id", None)
                 receipt_obj = PaymentEvidenceReceiptDoc(**existing_receipt)
                 linkage_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
                 assert linkage_doc is not None
+                linkage_doc.pop("_id", None)
                 return receipt_obj, BookingLinkageResponse(**linkage_doc)
-            raise BalanceEvidenceTamperedError(
-                f"Event ID '{evidence.event_id}' arrived with altered hash; possible replay tampering"
-            )
-
-        # 2. Check for duplicate successful transaction ID
-        if evidence.status == "completed":
-            dup_txn = self.receipts_col.find_one({
+            # If state == "received", prior run crashed before ledger application; resume below!
+            if existing_receipt.get("state") == "received":
+                logger.info("Resuming unapplied received receipt %s", evidence.event_id)
+                existing_receipt.pop("_id", None)
+                receipt_doc = PaymentEvidenceReceiptDoc(**existing_receipt)
+        else:
+            # 2. Validate request existence and matching facts
+            req_doc = self.requests_col.find_one({
+                "payment_id": evidence.payment_id,
                 "environment": evidence.environment,
                 "property_id": evidence.property_id,
-                "transaction_id": evidence.transaction_id,
-                "status": "completed",
-            })
-            if dup_txn:
+            }) if self.requests_col is not None else None
+
+            quarantine_reason = None
+            if req_doc is None:
+                quarantine_reason = f"Unknown or mismatched payment request '{evidence.payment_id}'"
+            elif req_doc.get("booking_reference") != clean_ref:
+                quarantine_reason = f"Booking reference mismatch: request={req_doc.get('booking_reference')}, evidence={clean_ref}"
+            elif req_doc.get("currency") != evidence.currency:
+                quarantine_reason = f"Currency mismatch: request={req_doc.get('currency')}, evidence={evidence.currency}"
+            elif Decimal(evidence.amount) != Decimal(req_doc.get("amount")):
+                quarantine_reason = "Payment amount does not match the request"
+            elif (evidence.environment != self.environment or evidence.property_id != self.property_id
+                  or evidence.test_run_id != self.test_run_id or req_doc.get("test_run_id") != self.test_run_id
+                  or evidence.is_test is not True or req_doc.get("is_test") is not True):
+                quarantine_reason = "Payment evidence does not match the active test scope"
+            elif req_doc.get("purpose") != "balance":
+                quarantine_reason = f"Request purpose mismatch: {req_doc.get('purpose')}"
+
+            if quarantine_reason:
+                logger.warning("Quarantining payment evidence %s: %s", evidence.event_id, quarantine_reason)
+                receipt_doc = PaymentEvidenceReceiptDoc(
+                    receipt_id=evidence.receipt_id,
+                    event_id=evidence.event_id,
+                    transaction_id=evidence.transaction_id,
+                    payment_id=evidence.payment_id,
+                    booking_reference=clean_ref,
+                    property_id=evidence.property_id,
+                    environment=evidence.environment,
+                    purpose="balance",
+                    amount=evidence.amount,
+                    currency=evidence.currency,
+                    status=evidence.status,
+                    occurred_at=evidence.occurred_at,
+                    verified_at=evidence.verified_at,
+                    evidence_source=evidence.evidence_source,
+                    raw_event_hash=evidence.raw_event_hash,
+                    state="quarantined",
+                    is_test=evidence.is_test,
+                    test_run_id=evidence.test_run_id,
+                    created_at=clock,
+                    applied_at=None,
+                    quarantine_reason=quarantine_reason,
+                )
+                self.receipts_col.insert_one(receipt_doc.model_dump(mode="json"))
+                linkage_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
+                assert linkage_doc is not None
+                linkage_doc.pop("_id", None)
+                return receipt_doc, BookingLinkageResponse(**linkage_doc)
+
+            # 3. Check for duplicate successful transaction ID
+            if evidence.status == "completed":
+                dup_txn = self.receipts_col.find_one({
+                    "environment": evidence.environment,
+                    "property_id": evidence.property_id,
+                    "transaction_id": evidence.transaction_id,
+                    "status": "completed",
+                })
+                if dup_txn and dup_txn.get("event_id") != evidence.event_id:
+                    logger.warning(
+                        "Transaction ID %s already claimed by receipt %s for payment %s",
+                        evidence.transaction_id, dup_txn.get("receipt_id"), dup_txn.get("payment_id"),
+                    )
+                    raise BalanceEvidenceTamperedError(
+                        f"Transaction ID '{evidence.transaction_id}' already applied to another payment"
+                    )
+
+            # 4. Check if request or booking is already fully paid (second distinct transaction)
+            linkage_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
+            if not linkage_doc:
+                raise BalanceNotFoundError(f"Booking reference '{clean_ref}' not found")
+
+            existing_payments = linkage_doc.get("payments", [])
+            already_completed = any(
+                p.get("payment_id") == evidence.payment_id and p.get("status") == "completed"
+                for p in existing_payments
+            )
+            if already_completed and evidence.status == "completed":
                 logger.warning(
-                    "Transaction ID %s already claimed by receipt %s for payment %s",
-                    evidence.transaction_id, dup_txn.get("receipt_id"), dup_txn.get("payment_id"),
+                    "Distinct transaction %s arrived for already completed request %s; flagging reconciliation",
+                    evidence.transaction_id, evidence.payment_id,
                 )
-                raise BalanceEvidenceTamperedError(
-                    f"Transaction ID '{evidence.transaction_id}' already applied to another payment"
+                receipt_doc = PaymentEvidenceReceiptDoc(
+                    receipt_id=evidence.receipt_id,
+                    event_id=evidence.event_id,
+                    transaction_id=evidence.transaction_id,
+                    payment_id=evidence.payment_id,
+                    booking_reference=clean_ref,
+                    property_id=evidence.property_id,
+                    environment=evidence.environment,
+                    purpose="balance",
+                    amount=evidence.amount,
+                    currency=evidence.currency,
+                    status=evidence.status,
+                    occurred_at=evidence.occurred_at,
+                    verified_at=evidence.verified_at,
+                    evidence_source=evidence.evidence_source,
+                    raw_event_hash=evidence.raw_event_hash,
+                    state="reconciliation_required",
+                    is_test=evidence.is_test,
+                    test_run_id=evidence.test_run_id,
+                    created_at=clock,
+                    applied_at=None,
+                    quarantine_reason=f"Multiple successful transactions for request '{evidence.payment_id}'",
                 )
+                self.receipts_col.insert_one(receipt_doc.model_dump(mode="json"))
+                linkage_doc.pop("_id", None)
+                return receipt_doc, BookingLinkageResponse(**linkage_doc)
 
-        receipt_doc = PaymentEvidenceReceiptDoc(
-            receipt_id=evidence.receipt_id,
-            event_id=evidence.event_id,
-            transaction_id=evidence.transaction_id,
-            payment_id=evidence.payment_id,
-            booking_reference=clean_ref,
-            property_id=evidence.property_id,
-            environment=evidence.environment,
-            purpose="balance",
-            amount=evidence.amount,
-            currency=evidence.currency,
-            status=evidence.status,
-            occurred_at=evidence.occurred_at,
-            verified_at=evidence.verified_at,
-            evidence_source=evidence.evidence_source,
-            raw_event_hash=evidence.raw_event_hash,
-            state="received",
-            is_test=evidence.is_test,
-            test_run_id=evidence.test_run_id,
-            created_at=clock,
-            applied_at=None,
-            quarantine_reason=None,
-        )
-        self.receipts_col.insert_one(receipt_doc.model_dump(mode="json"))
+            receipt_doc = PaymentEvidenceReceiptDoc(
+                receipt_id=evidence.receipt_id,
+                event_id=evidence.event_id,
+                transaction_id=evidence.transaction_id,
+                payment_id=evidence.payment_id,
+                booking_reference=clean_ref,
+                property_id=evidence.property_id,
+                environment=evidence.environment,
+                purpose="balance",
+                amount=evidence.amount,
+                currency=evidence.currency,
+                status=evidence.status,
+                occurred_at=evidence.occurred_at,
+                verified_at=evidence.verified_at,
+                evidence_source=evidence.evidence_source,
+                raw_event_hash=evidence.raw_event_hash,
+                state="received",
+                is_test=evidence.is_test,
+                test_run_id=evidence.test_run_id,
+                created_at=clock,
+                applied_at=None,
+                quarantine_reason=None,
+            )
+            self.receipts_col.insert_one(receipt_doc.model_dump(mode="json"))
 
-        # 3. Apply to canonical booking ledger via BookingLinkageService
+        # 5. Apply to canonical booking ledger via BookingLinkageService
         entry = PaymentLedgerEntry(
             payment_id=evidence.payment_id,
             provider=evidence.evidence_source,
@@ -577,46 +740,87 @@ class BalancePaymentService:
             actor=actor,
         )
 
-        # 4. Mark receipt applied
-        self.receipts_col.update_one(
-            {"receipt_id": evidence.receipt_id},
-            {"$set": {"state": "applied", "applied_at": clock}},
-        )
-        receipt_doc.state = "applied"
-        receipt_doc.applied_at = clock
-
-        # 5. Update request projection
+        # 7. Update request projection monotonically (cannot downgrade verified_paid)
         if self.requests_col is not None:
-            new_req_state = "verified_paid" if evidence.status == "completed" else "failed"
-            self.requests_col.update_one(
-                {"payment_id": evidence.payment_id},
+            if evidence.status == "completed":
+                self.requests_col.update_one(
+                    {"payment_id": evidence.payment_id},
+                    {
+                        "$set": {
+                            "state": "verified_paid",
+                            "paid_at": clock,
+                            "updated_at": clock,
+                        }
+                    },
+                )
+            elif evidence.status == "pending":
+                self.requests_col.update_one(
+                    {"payment_id": evidence.payment_id, "state": {"$ne": "verified_paid"}},
+                    {
+                        "$set": {
+                            "state": "pending",
+                            "updated_at": clock,
+                        }
+                    },
+                )
+            else:
+                self.requests_col.update_one(
+                    {"payment_id": evidence.payment_id, "state": {"$ne": "verified_paid"}},
+                    {
+                        "$set": {
+                            "state": "failed",
+                            "updated_at": clock,
+                        }
+                    },
+                )
+
+        # 8. Update booking active request projection monotonically
+        if evidence.status == "completed":
+            self.linkages_col.update_one(
+                {"booking_reference": clean_ref, "active_balance_request.payment_id": evidence.payment_id},
                 {
                     "$set": {
-                        "state": new_req_state,
-                        "paid_at": clock if evidence.status == "completed" else None,
-                        "updated_at": clock,
+                        "active_balance_request.state": "verified_paid",
+                        "active_balance_request.updated_at": clock,
+                    }
+                },
+            )
+        elif evidence.status == "pending":
+            self.linkages_col.update_one(
+                {"booking_reference": clean_ref, "active_balance_request.payment_id": evidence.payment_id, "active_balance_request.state": {"$ne": "verified_paid"}},
+                {
+                    "$set": {
+                        "active_balance_request.state": "pending",
+                        "active_balance_request.updated_at": clock,
+                    }
+                },
+            )
+        else:
+            self.linkages_col.update_one(
+                {"booking_reference": clean_ref, "active_balance_request.payment_id": evidence.payment_id, "active_balance_request.state": {"$ne": "verified_paid"}},
+                {
+                    "$set": {
+                        "active_balance_request.state": "failed",
+                        "active_balance_request.updated_at": clock,
                     }
                 },
             )
 
-        # 6. Update booking active request projection
-        self.linkages_col.update_one(
-            {"booking_reference": clean_ref},
-            {
-                "$set": {
-                    "active_balance_request.state": "verified_paid" if evidence.status == "completed" else "failed",
-                    "active_balance_request.updated_at": clock,
-                }
-            },
-        )
-
-        # 7. Trigger N08 pre-arrival reconciliation for truthful reminder suppression
+        # 9. Trigger N08 pre-arrival reconciliation for truthful reminder suppression
         if self.pre_arrival_service is not None:
             try:
                 self.pre_arrival_service.reconcile_booking(clean_ref, now=clock)
                 logger.info("Triggered N08 pre-arrival reconciliation for booking %s post balance payment", clean_ref)
             except Exception as exc:
                 logger.error("Error triggering N08 reconciliation for %s: %s", clean_ref, exc)
+                raise BalancePaymentError("Reminder reconciliation is pending") from exc
+
+        self.receipts_col.update_one(
+            {"receipt_id": evidence.receipt_id},
+            {"$set": {"state": "applied", "applied_at": clock}},
+        )
+        receipt_doc.state = "applied"
+        receipt_doc.applied_at = clock
 
         logger.info(
             "Ingested balance evidence %s for booking %s (amount: %s %s, status: %s)",
@@ -679,6 +883,33 @@ class BalancePaymentService:
                         updated_at=r.get("created_at") or now,
                     )
                 )
+
+        # Check for overdue collectible accounts
+        if len(items) < limit:
+            overdue_query: Dict[str, Any] = {
+                "opera_stay.hotel_id": prop,
+                "status": {"$in": ["linked", "confirmed"]},
+            }
+            for doc in self.linkages_col.find(overdue_query).limit(limit - len(items)):
+                clean_ref = doc["booking_reference"]
+                if any(item.booking_reference == clean_ref for item in items):
+                    continue
+                try:
+                    summary = self.get_balance_summary(clean_ref, property_id=prop, now=now)
+                    if summary.collection_status == "overdue":
+                        items.append(
+                            StaffBalanceAttentionItem(
+                                booking_reference=clean_ref,
+                                property_id=prop,
+                                state="overdue",
+                                amount=summary.balance_due,
+                                currency=summary.currency,
+                                reason="Balance payment is overdue",
+                                updated_at=now,
+                            )
+                        )
+                except Exception:
+                    continue
 
         return items
 

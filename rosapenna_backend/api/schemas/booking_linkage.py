@@ -6,6 +6,7 @@ import datetime as dt
 from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from rosapenna_backend.api.schemas.packages import PackageGuestName
 
 
 PRICE_PATTERN = r"^\d{1,8}(?:\.\d{1,2})?$"
@@ -171,6 +172,7 @@ class BookingLinkageResponse(BaseModel):
     status: LinkageStatus
     discrepancies: List[str] = Field(default_factory=list)
     lead_guest: LeadGuestContact
+    unassigned_guests: List[PackageGuestName] = Field(default_factory=list)
     opera_stay: Optional[OperaStayDetails] = None
     brs_rounds: List[BrsRoundDetails] = Field(default_factory=list)
     payments: List[PaymentLedgerEntry] = Field(default_factory=list)

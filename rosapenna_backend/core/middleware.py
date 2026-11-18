@@ -19,6 +19,7 @@ class RequestBodySizeLimitMiddleware:
         is_4k_capped = method == "POST" and bool(
             re.fullmatch(r"/staff/confirmations/[^/]{1,100}/retry", path)
             or re.fullmatch(r"/staff/pre-arrival/.*", path)
+            or re.fullmatch(r"/staff/balance-payments/.*", path)
         )
         max_bytes = min(self.max_bytes, 4096) if is_4k_capped else self.max_bytes
         content_length = next(

@@ -243,12 +243,11 @@ class TestBalancePaymentRecoveryAndConcurrency(unittest.TestCase):
             override_amount="1400.00",
             now=self.fixed_now,
         )
-        _, booking_res = self.service.ingest_verified_evidence(overpay_evidence, actor="webhook")
+        receipt, booking_res = self.service.ingest_verified_evidence(overpay_evidence, actor="webhook")
 
-        self.assertEqual(booking_res.financials["balance_due"], "0.00")
-        self.assertEqual(booking_res.financials["overpayment"], "200.00")
-        self.assertEqual(booking_res.financials["verified_paid_total"], "1800.00")
-        self.assertEqual(booking_res.financials["payment_status"], "fully_paid")
+        self.assertEqual(receipt.state, "quarantined")
+        self.assertEqual(booking_res.financials["balance_due"], "1200.00")
+        self.assertEqual(booking_res.financials["verified_paid_total"], "400.00")
 
 
 if __name__ == "__main__":

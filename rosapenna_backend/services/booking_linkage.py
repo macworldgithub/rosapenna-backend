@@ -29,6 +29,7 @@ from rosapenna_backend.api.schemas.booking_linkage import (
     StaffLinkBookingRequest,
 )
 from rosapenna_backend.core.logging import logger
+from rosapenna_backend.api.schemas.packages import PackageGuestName
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaNotFoundError
 
 
@@ -242,6 +243,8 @@ class BookingLinkageService:
         self,
         request: StaffLinkBookingRequest,
         actor: str,
+        *,
+        unassigned_guests: Optional[List[PackageGuestName]] = None,
     ) -> BookingLinkageResponse:
         """Create or associate a booking from online or offline channels with full idempotency."""
         now = _utc_now()
@@ -285,17 +288,46 @@ class BookingLinkageService:
             },
         )
 
+        accepted_snapshot = None
+        if status == "linked" and financials and financials.get("total_amount"):
+            try:
+                from rosapenna_backend.api.schemas.balance_payments import AcceptedFinancialsSnapshot
+                source = "online_quote" if request.source_channel == "online" else "staff_import"
+                tot = financials["total_amount"]
+                cur = financials.get("currency", "EUR")
+                snap_hash = AcceptedFinancialsSnapshot.compute_hash(
+                    booking_reference=ref,
+                    booking_revision=1,
+                    accepted_total=tot,
+                    currency=cur,
+                    source=source,
+                    evidence_reference=ref,
+                )
+                accepted_snapshot = AcceptedFinancialsSnapshot(
+                    schema_version=1,
+                    booking_revision=1,
+                    accepted_total=tot,
+                    currency=cur,
+                    accepted_snapshot_hash=snap_hash,
+                    accepted_at=now,
+                    evidence_reference=ref,
+                    source=source,
+                ).model_dump(mode="json")
+            except Exception as e:
+                logger.warning("Could not generate accepted_financials snapshot for %s: %s", ref, e)
+
         doc: Dict[str, Any] = {
             "booking_reference": ref,
             "source_channel": request.source_channel,
             "status": status,
             "discrepancies": discrepancies,
             "lead_guest": request.lead_guest.model_dump(mode="json"),
+            "unassigned_guests": [guest.model_dump(mode="json") for guest in unassigned_guests or []],
             "opera_stay": opera_stay.model_dump(mode="json") if opera_stay else None,
             "brs_rounds": [r.model_dump(mode="json") for r in request.brs_rounds],
             "payments": [p.model_dump(mode="json") for p in request.payments],
             "financials": financials,
-            "accepted_financials": None,
+            "accepted_financials": accepted_snapshot,
             "ledger_version": 1,
             "revision": 1,
             "active_balance_request": None,
@@ -405,13 +437,18 @@ class BookingLinkageService:
             "updated_at": now,
         }
 
-        self.collection.update_one(
-            {"booking_reference": booking_reference},
+        expected_ledger = existing.get("ledger_version", 1)
+        ledger_filter = ({"$or": [{"ledger_version": 1}, {"ledger_version": {"$exists": False}}]}
+                         if expected_ledger == 1 else {"ledger_version": expected_ledger})
+        result = self.collection.update_one(
+            {"booking_reference": booking_reference, **ledger_filter},
             {
                 "$set": update_fields,
                 "$push": {"audit_trail": audit_entry.model_dump(mode="json")},
             },
         )
+        if result.matched_count != 1:
+            raise LinkageConflictError("Booking payments changed during correction; reload and retry")
 
         updated_doc = self.collection.find_one({"booking_reference": booking_reference})
         assert updated_doc is not None

@@ -99,7 +99,7 @@ class TeesheetCache:
             "last_run": None,
         }
 
-    def get(self, day, course_id):
+    def get(self, day, course_id, *, force_refresh=False):
         """Return cached sheet if fresh within ttl_seconds; otherwise fetch live from BRS."""
         self.check_selection(day, course_id)
         key = (str(day), course_id)
@@ -107,7 +107,7 @@ class TeesheetCache:
 
         with self._cache_lock:
             entry = self._memory_cache.get(key)
-            if entry and (now_dt - entry["fetched_at"]).total_seconds() < self.ttl_seconds:
+            if not force_refresh and entry and (now_dt - entry["fetched_at"]).total_seconds() < self.ttl_seconds:
                 cached_data = entry["data"]
                 fetched_at = entry["fetched_at"]
                 start, end = self.window()
@@ -208,6 +208,8 @@ class TeesheetCache:
         players: Optional[int] = None,
         time_from: Optional[str] = None,
         time_to: Optional[str] = None,
+        *,
+        force_refresh: bool = False,
     ) -> BrsCourseAvailabilityResponse:
         """Query and filter tee-sheet slots and rates across 3 courses with explicit status."""
         self.check_selection(day, course_id)
@@ -220,7 +222,7 @@ class TeesheetCache:
             raise BrsUnsupportedQueryError("time_to must be strictly after time_from.")
 
         try:
-            sheet_result = self.get(day, course_id)
+            sheet_result = self.get(day, course_id, force_refresh=force_refresh)
             raw_data = sheet_result["data"]
             source = "brs_api" if sheet_result["cache"].get("live") else "cached_snapshot"
             retrieved_at = datetime.fromisoformat(sheet_result["cache"]["fetched_at"])

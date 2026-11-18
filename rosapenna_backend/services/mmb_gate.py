@@ -54,12 +54,12 @@ class MmbGateService:
             try:
                 doc = self.collection.find_one({"_id": GATE_DOCUMENT_ID})
                 if doc:
-                    return bool(doc.get("enabled", False))
+                    return doc.get("enabled") is True
                 return False
             except PyMongoError as err:
                 logger.warning("MongoDB read failed for MMB release gate (%s); failing closed", err)
                 return False
-        return bool(self._memory_state.get("enabled", False))
+        return self._memory_state.get("enabled") is True
 
     def get_public_status(self) -> Dict[str, Any]:
         """Public status summary safe for guest-facing responses without data leakage."""
@@ -97,7 +97,7 @@ class MmbGateService:
                 doc = self.collection.find_one({"_id": GATE_DOCUMENT_ID})
                 if doc:
                     state = {
-                        "enabled": bool(doc.get("enabled", False)),
+                        "enabled": doc.get("enabled") is True,
                         "updated_at": doc.get("updated_at", self._memory_state["updated_at"]),
                         "updated_by": doc.get("updated_by", "system"),
                         "written_request_reference": doc.get("written_request_reference"),
@@ -115,7 +115,7 @@ class MmbGateService:
                 pass
 
         return {
-            "enabled": bool(state.get("enabled", False)),
+            "enabled": state.get("enabled") is True,
             "updated_at": state.get("updated_at", dt.datetime.now(dt.timezone.utc).isoformat()),
             "updated_by": state.get("updated_by", "system_default"),
             "written_request_reference": state.get("written_request_reference"),

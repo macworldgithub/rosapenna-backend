@@ -25,6 +25,7 @@ from rosapenna_backend.api.schemas.pre_arrival import (
     PreArrivalPolicyDoc,
 )
 from rosapenna_backend.core.logging import logger
+from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.email_delivery import (
     ConfirmationTransportProtocol,
     DisabledConfirmationTransport,
@@ -94,7 +95,7 @@ class PreArrivalService:
         environment: str = "test",
         property_id: str = "ROSA",
         test_run_id: Optional[str] = None,
-        mmb_enabled: bool = False,
+        mmb_gate: Optional[MmbGateService] = None,
         balance_service: Optional[Any] = None,
         reminders_collection_name: str = "scheduled_booking_reminders",
         policies_collection_name: str = "pre_arrival_policies",
@@ -106,7 +107,7 @@ class PreArrivalService:
         self.environment = environment.strip().lower()
         self.property_id = property_id.strip().upper()
         self.test_run_id = test_run_id
-        self.mmb_enabled = mmb_enabled
+        self.mmb_gate = mmb_gate or MmbGateService(database=database)
         self.balance_service = balance_service
 
         self.reminders_col: Optional[Collection] = (
@@ -555,7 +556,8 @@ class PreArrivalService:
             "revision_number": current_rev,
         }))
         for ej in existing_jobs:
-            if ej.get("eligibility_hash") and ej.get("eligibility_hash") != eligibility_hash:
+            target_hash = booking_input.compute_eligibility_hash(reminder_type=ej.get("reminder_type"))
+            if ej.get("eligibility_hash") and ej.get("eligibility_hash") != target_hash:
                 # If balance is fully paid, suppress pending balance reminder rather than raising schedule conflict
                 if booking_input.balance_due <= Decimal("0.00") and ej.get("reminder_type") == "balance_due_first":
                     continue
@@ -596,6 +598,7 @@ class PreArrivalService:
             r_type = m["reminder_type"]
             due_at = m["due_at"]
             rem_id = f"REM-N08-{clean_ref}-{r_type}-R{current_rev}"
+            milestone_hash = booking_input.compute_eligibility_hash(reminder_type=r_type)
 
             filter_query = {
                 "environment": self.environment,
@@ -626,7 +629,7 @@ class PreArrivalService:
                                 "due_at": due_at,
                                 "next_attempt_at": due_at,
                                 "reason_code": m["reason_code"],
-                                "eligibility_hash": eligibility_hash,
+                                "eligibility_hash": milestone_hash,
                                 "policy_id": active_policy.policy_id,
                                 "policy_version": active_policy.version,
                                 "template_version": active_policy.template_version,
@@ -652,7 +655,7 @@ class PreArrivalService:
                     "policy_id": active_policy.policy_id,
                     "policy_version": active_policy.version,
                     "template_version": active_policy.template_version,
-                    "eligibility_hash": eligibility_hash,
+                    "eligibility_hash": milestone_hash,
                     "balance_due_date": m.get("balance_due_date"),
                     "balance_due_amount": m.get("balance_due_amount"),
                     "status": m["status"],
@@ -889,7 +892,7 @@ class PreArrivalService:
             return self.get_job_by_id(job.reminder_id)
 
         # Same-revision canonical facts changed check
-        current_hash = booking_input.compute_eligibility_hash()
+        current_hash = booking_input.compute_eligibility_hash(reminder_type=job.reminder_type)
         if job.eligibility_hash and job.eligibility_hash != current_hash:
             self._finalize_job_state(
                 job.reminder_id,
@@ -957,7 +960,7 @@ class PreArrivalService:
                     policy=policy,
                     attempt_id=attempt_id,
                     action_url=action_url,
-                    mmb_enabled=self.mmb_enabled,
+                    mmb_enabled=self.mmb_gate.is_enabled(),
                     message_id=job.message_id,
                     message_date=clock.isoformat(),
                     is_test=is_test_env,

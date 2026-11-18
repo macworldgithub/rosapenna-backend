@@ -226,6 +226,30 @@ class TestBalancePaymentServiceDomain(unittest.TestCase):
         summary_overdue = self.service.get_balance_summary(self.booking_ref, now=overdue_clock)
         self.assertEqual(summary_overdue.collection_status, "overdue")
 
+    def test_unapproved_or_ineffective_policy_blocks_collection(self):
+        for overrides in (
+            {"approval_status": "unresolved"},
+            {"effective_from": "2027-05-02"},
+            {"effective_to": "2027-04-30"},
+        ):
+            with self.subTest(overrides=overrides):
+                policies = self.db["pre_arrival_policies"]
+                policies.delete_many({})
+                policies.insert_one({**self.policy.model_dump(mode="json"), **overrides})
+                summary = self.service.get_balance_summary(self.booking_ref, now=self.fixed_now)
+                self.assertEqual(summary.collection_status, "blocked_dependency")
+                self.assertEqual(summary.blocked_reason, "UNAPPROVED_OR_EXPIRED_POLICY")
+                self.assertIsNone(summary.first_request_date)
+                with self.assertRaises(BalanceConflictError):
+                    self.service.ensure_balance_request(
+                        booking_reference=self.booking_ref,
+                        expected_booking_revision=1,
+                        expected_ledger_version=1,
+                        command_id="blocked-policy",
+                        actor="test_scheduler",
+                        now=self.fixed_now,
+                    )
+
     def test_ensure_balance_request_idempotent_and_bound(self):
         """Creating balance request binds exact remaining amount and returns identical on replay."""
         cmd_id = "cmd_test_balance_create_01"
