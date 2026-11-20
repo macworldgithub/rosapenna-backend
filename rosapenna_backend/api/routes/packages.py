@@ -17,6 +17,7 @@ from rosapenna_backend.api.schemas.packages import (
     UpdatePackageRulesRequest,
 )
 from rosapenna_backend.api.security import COMMON_DEPS
+from rosapenna_backend.integrations.prommt.client import PrommtError
 from rosapenna_backend.services.package_pricing import PackagePricingService
 
 router = APIRouter(prefix="/packages", tags=["packages"], dependencies=COMMON_DEPS)
@@ -68,6 +69,8 @@ def create_package_payment_link(
 ):
     try:
         return pricing_service.create_payment_link(request)
+    except PrommtError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 

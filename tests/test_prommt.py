@@ -9,9 +9,11 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import hmac
+import io
 import json
 import unittest
 from decimal import Decimal
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from pydantic import SecretStr
@@ -29,10 +31,12 @@ from rosapenna_backend.api.schemas.packages import (
 )
 from rosapenna_backend.integrations.prommt.client import (
     PrommtClient,
+    PrommtError,
     PrommtSettings,
 )
 from rosapenna_backend.integrations.prommt.schemas import (
     PrommtCreatePaymentRequest,
+    PrommtPaymentDetailsResponse,
     PrommtPaymentRequestResponse,
     PrommtWebhookPayload,
 )
@@ -55,7 +59,11 @@ class FakeCollection:
                 if k == "$or":
                     or_match = False
                     for subq in v:
-                        if all(doc.get(sk) == sv for sk, sv in subq.items()):
+                        if all(
+                            (sk in doc) == sv["$exists"] if isinstance(sv, dict) and "$exists" in sv
+                            else doc.get(sk) == sv
+                            for sk, sv in subq.items()
+                        ):
                             or_match = True
                             break
                     if not or_match:
@@ -79,6 +87,8 @@ class FakeCollection:
                     if pk not in self.docs[key]:
                         self.docs[key][pk] = []
                     self.docs[key][pk].append(pv)
+            return SimpleNamespace(modified_count=1)
+        return SimpleNamespace(modified_count=0)
 
 
 class PrommtIntegrationTests(unittest.TestCase):
@@ -92,6 +102,44 @@ class PrommtIntegrationTests(unittest.TestCase):
             PROMMT_ALLOW_LIVE_CALLS=False,
         )
         self.client = PrommtClient(settings=self.settings)
+
+    def test_real_checkout_only_returns_a_prommt_test_link(self):
+        request = PrommtCreatePaymentRequest(
+            amount=5, currency="EUR", payerEmail="guest@example.com",
+            payerFirstName="Test", payerLastName="Guest", externalId="RSP-TEST-001",
+        )
+        created = {"resourceId": "test-resource", "url": "https://prommt.com/opaque-test-link"}
+        app_settings = SimpleNamespace(environment="test", payment_mode="prommt_test")
+        with patch("rosapenna_backend.config.settings", app_settings), patch("urllib.request.build_opener") as build:
+            opener = build.return_value
+            for content, expected_return in (
+                ([], False),
+                ([{"id": "test-resource", "externalId": "another-booking"}], False),
+                ([{"id": "test-resource", "externalId": "RSP-TEST-001"}], True),
+            ):
+                with self.subTest(content=content):
+                    opener.open.reset_mock()
+                    opener.open.side_effect = [
+                        io.BytesIO(json.dumps(created).encode()),
+                        io.BytesIO(json.dumps({"content": content}).encode()),
+                    ]
+                    if expected_return:
+                        self.assertEqual(self.client.create_test_checkout_link(request).payment_url, created["url"])
+                    else:
+                        with self.assertRaisesRegex(PrommtError, "did not verify"):
+                            self.client.create_test_checkout_link(request)
+                    post, lookup = [call.args[0] for call in opener.open.call_args_list]
+                    sent = json.loads(post.data)
+                    self.assertEqual(sent["channel"], "LINK")
+                    self.assertEqual(sent["customParams"], {"Confirmation Number:": "RSP-TEST-001"})
+                    self.assertFalse(sent["confirmation"])
+                    self.assertTrue(lookup.full_url.endswith("/paymentrequests?mode=TEST"))
+
+            app_settings.environment = "production"
+            opener.open.reset_mock()
+            with self.assertRaisesRegex(PrommtError, "unavailable"):
+                self.client.create_test_checkout_link(request)
+            opener.open.assert_not_called()
 
     def test_client_sandbox_guard_prevents_live_network_calls(self):
         """AC 1: allow_live_calls=False returns deterministic sandbox response without HTTP requests."""
@@ -247,8 +295,12 @@ class PrommtIntegrationTests(unittest.TestCase):
             "amount": "310.00",
             "currency": "EUR",
             "status": "unpaid",
+            "evidence_source": "prommt",
+            "is_test": True,
             "expires_at": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=7)).isoformat(),
         }
+        pricing_service.payments_collection = FakeCollection()
+        pricing_service.payments_collection.insert_one(pricing_service._payments_cache[payment_id])
 
         # Seed linkage record in FakeCollection
         fake_coll.docs[booking_ref] = {
@@ -281,7 +333,7 @@ class PrommtIntegrationTests(unittest.TestCase):
         payload = {
             "eventId": "evt_succ_001",
             "type": "PAYMENT_REQUEST",
-            "timestamp": now_ts,
+            "timestamp": str(now_ts * 1000),
             "event": "PAID_SUCCESS",
             "resourceId": prommt_resource_id,
             "mode": "TEST",
@@ -290,8 +342,43 @@ class PrommtIntegrationTests(unittest.TestCase):
         raw_body = json.dumps(payload).encode("utf-8")
         sig = hmac.new(self.webhook_secret.encode("utf-8"), raw_body, hashlib.sha256).hexdigest()
 
-        # 1. First webhook execution -> Success
-        result = pricing_service.process_prommt_webhook(raw_body, sig)
+        for invalid_event, error in (
+            ({"resourceId": "other-request"}, LookupError),
+            ({"mode": "LIVE"}, ValueError),
+        ):
+            invalid_body = json.dumps({**payload, **invalid_event}).encode()
+            invalid_sig = hmac.new(self.webhook_secret.encode(), invalid_body, hashlib.sha256).hexdigest()
+            with self.assertRaises(error):
+                pricing_service.process_prommt_webhook(invalid_body, invalid_sig)
+
+        provider_details = {
+            "transactionId": prommt_resource_id,
+            "externalId": booking_ref,
+            "requestedAmount": 310,
+            "amount": 310,
+            "currency": "EUR",
+            "status": "PAID_SUCCESS",
+        }
+        with patch.object(self.client, "get_payment_details") as lookup:
+            for mismatched in (
+                {"amount": 309.99}, {"currency": "GBP"}, {"currency": None}, {"status": "PROCESSING"},
+            ):
+                with self.subTest(mismatched=mismatched):
+                    lookup.return_value = PrommtPaymentDetailsResponse.model_validate(
+                        {**provider_details, **mismatched}
+                    )
+                    with self.assertRaises(ValueError):
+                        pricing_service.process_prommt_webhook(raw_body, sig)
+                    self.assertEqual(linkage_service.get_linkage(booking_ref).payments, [])
+                    self.assertEqual(pricing_service.get_payment(payment_id)["status"], "unpaid")
+
+            lookup.return_value = PrommtPaymentDetailsResponse.model_validate(provider_details)
+            with patch.object(linkage_service, "record_payment", side_effect=RuntimeError("test write failure")):
+                with self.assertRaisesRegex(RuntimeError, "test write failure"):
+                    pricing_service.process_prommt_webhook(raw_body, sig)
+            self.assertEqual(pricing_service.get_payment(payment_id)["status"], "unpaid")
+            result = pricing_service.process_prommt_webhook(raw_body, sig)
+            lookup.assert_called_with(prommt_resource_id)
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["payment_state"], "verified_paid")
 
@@ -303,9 +390,15 @@ class PrommtIntegrationTests(unittest.TestCase):
         self.assertEqual(updated_linkage.payments[0].status, "completed")
         self.assertEqual(updated_linkage.payments[0].provider, "prommt")
 
-        # 2. Second webhook execution (replay / network retry) -> Idempotent
+        # Replay after losing the in-memory cache uses the persisted payment state.
+        pricing_service._payments_cache.clear()
         retry_result = pricing_service.process_prommt_webhook(raw_body, sig)
         self.assertEqual(retry_result["status"], "already_processed")
+
+        late_failure = json.dumps({**payload, "eventId": "evt_late", "event": "PAID_FAILED"}).encode()
+        late_signature = hmac.new(self.webhook_secret.encode(), late_failure, hashlib.sha256).hexdigest()
+        late_result = pricing_service.process_prommt_webhook(late_failure, late_signature)
+        self.assertEqual(late_result["payment_state"], "verified_paid")
 
         # Ledger paid total must NOT be double-counted
         linkage_after_retry = linkage_service.get_linkage(booking_ref)
@@ -334,6 +427,8 @@ class PrommtIntegrationTests(unittest.TestCase):
             "amount": "310.00",
             "currency": "EUR",
             "status": "unpaid",
+            "evidence_source": "prommt",
+            "is_test": True,
             "expires_at": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=7)).isoformat(),
         }
 

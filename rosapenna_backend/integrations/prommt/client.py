@@ -60,11 +60,79 @@ class PrommtAuthError(PrommtError):
         super().__init__(message, status_code=401, detail_code="prommt_auth_error")
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class PrommtClient:
     """Client for interacting with the Prommt API gateway."""
 
     def __init__(self, settings: Optional[PrommtSettings] = None):
         self.settings = settings or PrommtSettings()
+
+    def create_test_checkout_link(self, request: PrommtCreatePaymentRequest) -> PrommtPaymentRequestResponse:
+        """Create a link-only request and verify the exact request appears in Prommt TEST."""
+        from rosapenna_backend.config import settings as app_settings
+
+        origin = "https://gw.prommt.com/api/v1"
+        key = self.settings.api_key.get_secret_value().strip()
+        if (
+            app_settings.environment != "test"
+            or app_settings.payment_mode != "prommt_test"
+            or self.settings.mode != "TEST"
+            or self.settings.base_url.rstrip("/") != origin
+            or not key
+            or request.currency != "EUR"
+            or not request.external_id
+        ):
+            raise PrommtError("Prommt test checkout is unavailable.", status_code=503)
+
+        opener = urllib.request.build_opener(_NoRedirect())
+        headers = {"Authorization": f"apikey {key}", "Accept": "application/json", "Content-Type": "application/json"}
+
+        def call(path: str, data: Optional[bytes] = None) -> dict:
+            req = urllib.request.Request(origin + path, data=data, headers=headers)
+            with opener.open(req, timeout=self.settings.timeout_seconds) as response:
+                return json.load(response)
+
+        # Link-only mode does not select an email or SMS delivery channel.
+        payload = {
+            "amount": request.amount,
+            "currency": "EUR",
+            "channel": "LINK",
+            "confirmation": False,
+            "amountEditable": False,
+            "payerFirstName": request.payer_first_name,
+            "payerLastName": request.payer_last_name,
+            "payerEmail": request.payer_email,
+            "description": request.description,
+            "externalId": request.external_id,
+            "customParams": {"Confirmation Number:": request.external_id},
+        }
+
+        try:
+            created = PrommtPaymentRequestResponse.model_validate(call("/paymentrequests", json.dumps(payload).encode()))
+            records = call("/paymentrequests?mode=TEST").get("content", [])
+            if not any(isinstance(record, dict) and record.get("id") == created.resource_id
+                       and record.get("externalId") == request.external_id for record in records):
+                raise PrommtError("Prommt did not verify this request as TEST. The link was withheld.")
+            resource = urllib.parse.quote(created.resource_id, safe="")
+            url = created.payment_url or call(f"/paymentrequests/{resource}/link").get("url")
+            parts = urllib.parse.urlsplit(url or "")
+            if (
+                parts.scheme != "https"
+                or parts.hostname not in {"prommt.com", "pay.prommt.com"}
+                or parts.port not in {None, 443}
+                or parts.username is not None
+                or parts.password is not None
+            ):
+                raise PrommtError("Prommt did not return a valid hosted payment link.")
+            return created.model_copy(update={"payment_url": url})
+        except PrommtError:
+            raise
+        except (ValueError, TypeError, AttributeError, urllib.error.URLError):
+            raise PrommtError("Prommt could not create or verify the test payment link.") from None
 
     def create_payment_request(
         self,
@@ -164,10 +232,8 @@ class PrommtClient:
         """Fetch payment request details from Prommt."""
         if not self.settings.allow_live_calls:
             return PrommtPaymentDetailsResponse(
-                id=payment_request_id,
+                transactionId=payment_request_id,
                 status="CREATED",
-                amount=250.00,
-                currency="EUR",
                 channel="LINK",
             )
 
@@ -219,5 +285,8 @@ class PrommtClient:
             ts = int(timestamp)
         except (ValueError, TypeError):
             return False
+        # The Prommt field table uses milliseconds and its sample uses seconds.
+        if ts >= 10**12:
+            ts /= 1000
         now_ts = int(dt.datetime.now(dt.timezone.utc).timestamp())
         return abs(now_ts - ts) <= max_skew_seconds
