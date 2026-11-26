@@ -213,6 +213,7 @@ def create_app() -> FastAPI:
     application.include_router(availability.router)
     application.include_router(golf_rounds.router)
     application.include_router(packages.router)
+    application.include_router(packages.webhook_router)
     application.include_router(bookings.router)
     application.include_router(booking_intents.router)
     application.include_router(booking_operations.router)

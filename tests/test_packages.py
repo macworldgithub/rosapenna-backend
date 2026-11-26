@@ -524,7 +524,9 @@ class PackageRouteHandlerTests(unittest.TestCase):
             guests[1],
         ])
         self.assertNotIn("additional_guests", link_res.model_dump())
-        self.assertEqual(get_package_payment(link_res.payment_id, self.service), {"status": "unpaid"})
+        self.assertEqual(get_package_payment(link_res.payment_id, self.service), {
+            "status": "unpaid", "booking_status": "awaiting_payment",
+        })
 
         self.assertEqual(link_res.amount, quote.deposit_amount)
         self.assertEqual(link_res.currency, "EUR")
@@ -593,6 +595,17 @@ class PackageRouteHandlerTests(unittest.TestCase):
         # 4. Duplicate callback returns idempotent already_processed
         dup_res = self.service.process_payment_callback(good_cb, secret)
         self.assertEqual(dup_res["status"], "already_processed")
+
+    def test_expiry_read_preserves_payment_verified_by_another_worker(self):
+        payment_id = "pay_expiry_race"
+        expired_at = (dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=1)).isoformat()
+        unpaid = {"payment_id": payment_id, "status": "unpaid", "expires_at": expired_at}
+        self.service._payments_cache[payment_id] = unpaid
+        self.db.package_payments.insert_one({**unpaid, "status": "verified_paid"})
+
+        self.assertEqual(self.service.get_payment(payment_id)["status"], "verified_paid")
+        self.assertEqual(unpaid["status"], "unpaid")
+        self.assertEqual(self.db.package_payments.find_one({"payment_id": payment_id})["status"], "verified_paid")
 
     def test_route_calculate_package_quote(self):
         req = PackageQuoteRequest(

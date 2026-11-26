@@ -111,6 +111,17 @@ def amount(value):
     return result
 
 
+def tee_time_is_empty(sheet, time, players):
+    """Accept one exact row only when every reported player slot is available."""
+    matches = [row for row in sheet["data"]["tee_times"] if row["time"] == time]
+    if len(matches) != 1:
+        return False
+    slots = matches[0]["slots"]
+    return len(slots) >= players and all(
+        slot.get("status") == "Available" for slot in slots.values()
+    )
+
+
 def validate_sheet(payload, requested_date):
     """Reject bad/incorrect-date upstream data before replacing a good snapshot."""
     data = payload.get("data")

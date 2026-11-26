@@ -2,14 +2,14 @@
 
 Starts an isolated backend process on 127.0.0.1 with a fresh run identity, a
 fresh signing secret, a dedicated local MongoDB database, and no inherited live
-provider credentials. This launcher starts the backend only. The website
-process has not yet been isolated and must not be used for an N06 journey.
+provider credentials. Optionally starts a loopback Next.js test website.
 """
 
 from __future__ import annotations
 
 import argparse
 import datetime as dt
+import json
 import os
 import secrets
 import signal
@@ -20,6 +20,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+from urllib.parse import urlencode
 from pathlib import Path
 
 LOCAL_MONGO_URI = "mongodb://127.0.0.1:27017"
@@ -28,6 +29,52 @@ SAFE_ENV_KEYS = {
     "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOMEDRIVE", "HOMEPATH",
     "VIRTUAL_ENV",
 }
+
+
+class SampleTeeSheetReader:
+    """Provide synthetic tee times for the simulation process."""
+
+    def __init__(self, app_state):
+        self.app_state = app_state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass
+
+    def fetch(self, day, course_id):
+        client = getattr(self.app_state, "brs_booking_client", None)
+        occupied = set()
+        if client is not None:
+            with client._sandbox_lock:
+                occupied = {round_.time for round_ in client._sandbox_rounds.values()
+                            if round_.course_id == course_id and round_.date.isoformat() == day
+                            and round_.status not in {"Released", "Cancelled"}}
+        visitor_port = os.getenv("N06_VISITOR_PORT")
+        if visitor_port:
+            query = urlencode({"date": day, "course_id": course_id})
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{int(visitor_port)}/tee-sheet?{query}",
+                headers={"X-API-Key": os.environ["BOOKING_API_KEY"]},
+            )
+            with urllib.request.urlopen(request, timeout=15) as response:
+                sheet = json.load(response)
+            for row in sheet["tee_times"]:
+                if row["time"] in occupied:
+                    for slot in row["slots"].values():
+                        slot["status"] = "Booked"
+            return sheet
+        return {
+            "tee_date": day,
+            "currency_code": "EUR",
+            "tee_times": [{
+                "id": course_id * 100 + index,
+                "time": at,
+                "slots": {str(i): {"status": "Booked" if at in occupied else "Available"} for i in range(4)},
+                "green_fees": [],
+            } for index, at in enumerate(("10:00", "14:00"))],
+        }
 
 SITE_CUSTOMIZE = '''"""Loopback-only network policy for the N06 simulation child process."""
 import os
@@ -181,11 +228,18 @@ def main() -> int:
     parser.add_argument("--frontend-port", type=int, default=3030, help="Frontend dev port to print (default 3030).")
     parser.add_argument("--check", action="store_true", help="Start, verify health, then stop and clean up.")
     parser.add_argument("--keep-data", action="store_true", help="Keep the isolated database after shutdown.")
+    parser.add_argument("--frontend", type=Path, help="Start the test website from this frontend project.")
+    parser.add_argument("--visitor-availability", action=argparse.BooleanOptionalAction, default=False,
+                        help="Read tee times from the public BRS visitor site.")
     args = parser.parse_args()
 
     if not _mongo_reachable():
         print("ERROR: local MongoDB is not reachable at 127.0.0.1:27017.")
         print("Start a local MongoDB service first. No shared or cloud database is used.")
+        return 1
+
+    if args.frontend and not _port_is_free(args.frontend_port):
+        print(f"ERROR: test website port {args.frontend_port} is already in use.")
         return 1
 
     backend_root = Path(__file__).resolve().parents[1]
@@ -234,8 +288,12 @@ def main() -> int:
 
     child_code = (
         "import uvicorn;"
-        "from rosapenna_backend.main import app;"
-        f"uvicorn.run(app, host='127.0.0.1', port={port}, log_level='info')"
+        "from functools import partial;"
+        "from scripts.run_n06_simulation import SampleTeeSheetReader;"
+        "import rosapenna_backend.main as main;"
+        "main.TeesheetCache = partial(main.TeesheetCache, "
+        "reader_factory=partial(SampleTeeSheetReader, main.app.state));"
+        f"uvicorn.run(main.app, host='127.0.0.1', port={port}, log_level='info')"
     )
 
     print("=" * 72)
@@ -244,49 +302,70 @@ def main() -> int:
     print(f"Run ID        : {run_id}")
     print(f"Backend       : {backend_url}")
     print(f"API docs      : {backend_url}/docs")
-    print("Frontend      : not started; process isolation is not yet verified")
     print(f"Local MongoDB : {LOCAL_MONGO_URI} / {database_name} (isolated, owned by this run)")
     print("The backend does not inherit live provider or cloud database settings.")
     print()
 
-    process = subprocess.Popen(
-        [sys.executable, "-c", child_code],
-        cwd=str(run_dir),
-        env=env,
-        stdout=None,
-        stderr=None,
-    )
-
+    process = None
+    frontend = None
+    visitor_server = None
     try:
+        if args.visitor_availability:
+            from scripts.n06_visitor_availability import start_visitor_reader
+            visitor_server = start_visitor_reader(api_key)
+            env["N06_VISITOR_PORT"] = str(visitor_server.server_port)
+        process = subprocess.Popen([sys.executable, "-c", child_code], cwd=str(run_dir), env=env)
         if not _wait_for_health(backend_url, api_key):
             print("ERROR: backend did not report healthy within 45 seconds.")
             return 1
 
         print("Backend health check: OK")
         print()
-        print("Website isolation is incomplete. Do not use this launcher for a browser journey yet.")
-        print("Press Ctrl+C to stop the backend and remove the isolated database.")
+        if args.frontend:
+            web_env = {key: value for key, value in os.environ.items() if key.upper() in SAFE_ENV_KEYS}
+            web_env.update({
+                "BOOKING_ENVIRONMENT": "development",
+                "BOOKING_BACKEND_URL": backend_url,
+                "BOOKING_API_KEY": api_key,
+                "BOOKING_DEV_TEST_ORIGIN": f"http://127.0.0.1:{args.frontend_port}",
+                "__NEXT_PROCESSED_ENV": "true",
+                "NEXT_TELEMETRY_DISABLED": "1",
+            })
+            frontend = subprocess.Popen(
+                ["node", "node_modules/next/dist/bin/next", "dev", "--hostname", "127.0.0.1",
+                 "--port", str(args.frontend_port)],
+                cwd=args.frontend.resolve(),
+                env=web_env,
+            )
+            print(f"Open http://127.0.0.1:{args.frontend_port}/ for the Stay & Play test")
+        print("Press Ctrl+C to stop the services and remove the isolated database.")
         print()
 
         if args.check:
             print("Check mode: startup verified; stopping now.")
             return 0
 
-        while process.poll() is None:
+        while process.poll() is None and (frontend is None or frontend.poll() is None):
             time.sleep(1)
-        print("Backend process exited unexpectedly.")
+        print("A test service exited unexpectedly.")
         return 1
     except KeyboardInterrupt:
         print("Stopping simulation backend...")
         return 0
     finally:
-        if process.poll() is None:
+        if frontend is not None and frontend.poll() is None:
+            frontend.terminate()
+            frontend.wait(timeout=15)
+        if process is not None and process.poll() is None:
             process.send_signal(signal.SIGTERM)
             try:
                 process.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 process.kill()
                 process.wait(timeout=5)
+        if visitor_server is not None:
+            visitor_server.shutdown()
+            visitor_server.server_close()
         if not args.keep_data:
             _drop_database(database_name, run_id)
 

@@ -608,7 +608,8 @@ class TestBookingLinkageRoutes(unittest.TestCase):
         self.assertEqual(fetched.booking_reference, "RSP-20270514-ROUTE01")
 
     def test_guest_lookup_gated_by_mmb_release_gate(self):
-        """When MMB release gate is OFF (default), require_mmb_enabled blocks guest lookup with HTTP 503."""
+        """When MMB release gate is explicitly off, require_mmb_enabled blocks guest lookup with HTTP 503."""
+        self.db["mmb_release_gate"].insert_one({"_id": "mmb_release_gate", "enabled": False})
         # 1. Pre-seed booking
         seed_req = StaffLinkBookingRequest(
             booking_reference="RSP-20270514-GATED01",

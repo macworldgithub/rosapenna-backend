@@ -310,7 +310,7 @@ class TestMmbM16ActionHistoryAndRecovery(unittest.TestCase):
                 ProposedGolfRoundOption(
                     course_name="Sandy Hills Links",
                     date=dt.date(2027, 8, 11),
-                    time="09:30",
+                    time="10:00",
                     players=2,
                     holes="18",
                     round_price_total="300.00",
@@ -374,6 +374,11 @@ class TestMmbM16ActionHistoryAndRecovery(unittest.TestCase):
         mock_opera_write.confirmation_number = "CONF-OP-M1601"
         self.mock_opera.amend_reservation.return_value = mock_opera_write
 
+        self.mock_pricing.teesheet_cache.get.return_value = {"data": {"tee_times": [{
+            "time": "10:00",
+            "slots": {str(position): {"status": "Available"} for position in range(1, 5)},
+        }]}}
+
         mock_brs_write = MagicMock()
         mock_brs_write.verified_via_readback = True
         mock_brs_write.round_id = "RND-SANDY-REPLACE-01"
@@ -401,6 +406,7 @@ class TestMmbM16ActionHistoryAndRecovery(unittest.TestCase):
         self.assertEqual(res.stage, "completed")
         self.assertTrue(res.readback_verified)
         self.assertEqual(res.new_booking_revision, 2)
+        self.mock_pricing.teesheet_cache.get.assert_called_once_with(dt.date(2027, 8, 11), 3, force_refresh=True)
 
         # Linkage is updated to Revision 2
         linkage_after = self.linkage_service.get_linkage(self.ref)

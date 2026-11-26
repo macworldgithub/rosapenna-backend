@@ -37,7 +37,6 @@ from rosapenna_backend.services.mmb_auth import (
     InvalidOtpError,
     InvalidSessionError,
     MmbAuthService,
-    MmbOtpCooldownError,
 )
 from rosapenna_backend.services.mmb_gate import MmbGateService
 
@@ -90,8 +89,8 @@ class TestMmbAuthService(unittest.TestCase):
         self.mongo.close()
 
     def test_request_otp_matching_booking_sends_email(self):
-        """Requesting OTP for an exact matching reference and surname sends email with 6-digit code."""
-        res = self.auth_service.request_otp("RSP-20270514-AUTH01", "Golfer")
+        """Requesting OTP for an matching reference alone sends email with 6-digit code."""
+        res = self.auth_service.request_otp("RSP-20270514-AUTH01")
         self.assertTrue(res.success)
         self.assertIn("If the booking details match our records", res.message)
 
@@ -128,9 +127,11 @@ class TestMmbAuthService(unittest.TestCase):
         """Repeated OTP requests within the 60-second cooldown window are throttled."""
         self.auth_service.request_otp("RSP-20270514-AUTH01", "Golfer")
 
-        # Immediate repeat should trigger cooldown
-        with self.assertRaises(MmbOtpCooldownError):
-            self.auth_service.request_otp("RSP-20270514-AUTH01", "Golfer")
+        # Throttle delivery without exposing that a code was sent previously.
+        repeat = self.auth_service.request_otp("RSP-20270514-AUTH01")
+        unknown = self.auth_service.request_otp("RSP-NONEXISTENT")
+        self.assertEqual(repeat, unknown)
+        self.assertEqual(len(self.email_service._dispatched_emails), 1)
 
     def test_request_otp_resend_invalidates_prior_code(self):
         """Requesting a new OTP code invalidates any previous active code for that booking."""
@@ -329,7 +330,8 @@ class TestMmbAuthRoutes(unittest.TestCase):
         self.mongo.close()
 
     def test_routes_gated_when_mmb_is_disabled(self):
-        """When MMB release gate is OFF (default), require_mmb_enabled blocks OTP requests with HTTP 503."""
+        """When MMB release gate is explicitly off, require_mmb_enabled blocks OTP requests with HTTP 503."""
+        self.db["mmb_release_gate"].insert_one({"_id": "mmb_release_gate", "enabled": False})
         mock_request = MagicMock()
         mock_request.app.state.mmb_gate_service = self.mmb_gate_service
         with self.assertRaises(HTTPException) as cm:
@@ -346,7 +348,7 @@ class TestMmbAuthRoutes(unittest.TestCase):
         )
 
         # 1. Request OTP via route
-        req = RequestOtpRequest(booking_reference="RSP-20270514-ROUTE01", last_name="Golfer")
+        req = RequestOtpRequest(booking_reference="RSP-20270514-ROUTE01")
         res = request_one_time_code(req, self.auth_service)
         self.assertTrue(res.success)
 

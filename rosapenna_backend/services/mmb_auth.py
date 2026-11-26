@@ -41,11 +41,6 @@ class MmbAuthError(Exception):
         self.status_code = status_code
 
 
-class MmbOtpCooldownError(MmbAuthError):
-    def __init__(self, message: str = "Please wait before requesting another verification code."):
-        super().__init__(message, status_code=429)
-
-
 class InvalidOtpError(MmbAuthError):
     def __init__(self, message: str = "Invalid or expired verification code."):
         super().__init__(message, status_code=400)
@@ -116,9 +111,9 @@ class MmbAuthService:
     def request_otp(
         self,
         booking_reference: str,
-        last_name: str,
+        last_name: Optional[str] = None,
     ) -> RequestOtpResponse:
-        """Issue and dispatch an OTP code if the booking reference and surname match.
+        """Issue and dispatch an OTP code for the email saved on the matching booking.
 
         Enforces:
         - Cooldown between repeated requests.
@@ -128,7 +123,6 @@ class MmbAuthService:
         """
         now = _utc_now()
         clean_ref = booking_reference.strip().upper()
-        clean_name = last_name.strip().lower()
 
         # Check cooldown if recent OTP was requested for this reference
         if self.otp_col is not None:
@@ -139,31 +133,26 @@ class MmbAuthService:
             if recent_otp is not None:
                 elapsed = (now - recent_otp["created_at"]).total_seconds()
                 if elapsed < OTP_RESEND_COOLDOWN_SECONDS:
-                    raise MmbOtpCooldownError(
-                        f"Please wait {int(OTP_RESEND_COOLDOWN_SECONDS - elapsed)} seconds before requesting another code."
-                    )
+                    return RequestOtpResponse(cooldown_seconds=OTP_RESEND_COOLDOWN_SECONDS)
 
         # Look up exact booking in linkages collection
         booking_doc: Optional[Dict[str, Any]] = None
         if self.linkages_col is not None:
             booking_doc = self.linkages_col.find_one({"booking_reference": clean_ref})
 
-        # Match surname strictly
-        matched = False
-        lead_email = ""
-        lead_name = ""
-        if booking_doc is not None:
-            stored_last_name = (
-                booking_doc.get("lead_guest", {}).get("last_name", "").strip().lower()
-            )
-            if stored_last_name == clean_name:
-                matched = True
-                lead_email = booking_doc.get("lead_guest", {}).get("email", "").strip()
-                lead_first = booking_doc.get("lead_guest", {}).get("first_name", "").strip()
-                lead_last = booking_doc.get("lead_guest", {}).get("last_name", "").strip()
-                lead_name = f"{lead_first} {lead_last}".strip() or "Valued Guest"
+        guest = (booking_doc or {}).get("lead_guest")
+        guest = guest if isinstance(guest, dict) else {}
+        stored_email = guest.get("email")
+        stored_last_name = guest.get("last_name")
+        matches_legacy_name = last_name is None or (
+            isinstance(stored_last_name, str) and stored_last_name.strip().casefold() == last_name.strip().casefold()
+        )
+        lead_email = stored_email.strip() if isinstance(stored_email, str) else ""
+        lead_name = " ".join(
+            name.strip() for name in (guest.get("first_name"), stored_last_name) if isinstance(name, str)
+        ).strip() or "Valued Guest"
 
-        if matched and lead_email:
+        if lead_email and matches_legacy_name:
             # 1. Invalidate any existing active OTP codes for this booking (Resend Invalidation)
             if self.otp_col is not None:
                 self.otp_col.update_many(
@@ -200,13 +189,6 @@ class MmbAuthService:
                 _mask_email(lead_email),
                 OTP_EXPIRY_MINUTES,
             )
-            from rosapenna_backend.config import settings
-            if settings.security_bypass_in_dev:
-                logger.info(
-                    "[DEV MODE] One-time verification code for %s is %s (Test bypass code 123456 is also accepted)",
-                    clean_ref,
-                    raw_code,
-                )
             self.email_service.send_one_time_code(
                 recipient_email=lead_email,
                 recipient_name=lead_name,

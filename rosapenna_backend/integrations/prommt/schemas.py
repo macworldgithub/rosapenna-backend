@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from decimal import Decimal
 from typing import Any, Dict, List, Literal, Optional, Union
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -60,10 +61,11 @@ class PrommtPaymentDetailsResponse(BaseModel):
     """Details returned from GET /api/v1/paymentrequests/{paymentRequestId}."""
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
-    id: str
+    transaction_id: Optional[str] = Field(default=None, alias="transactionId")
+    external_id: Optional[str] = Field(default=None, alias="externalId")
     status: str
-    amount: float
-    currency: str = "EUR"
+    amount: Optional[Decimal] = Field(default=None, allow_inf_nan=False)
+    currency: Optional[str] = None
     payer_email: Optional[str] = Field(default=None, alias="payerEmail")
     channel: Optional[str] = None
     paid_at: Optional[str] = Field(default=None, alias="paidAt")
@@ -74,13 +76,13 @@ class PrommtWebhookPayload(BaseModel):
     model_config = ConfigDict(extra="ignore", populate_by_name=True)
 
     event_id: str = Field(alias="eventId")
-    type: str = Field(default="PAYMENT_REQUEST")
+    type: str
     timestamp: Union[int, str]
     event: str  # PAID_SUCCESS, PAID_FAILED, EXPIRED, CANCELED, SENT, etc.
     value: Optional[str] = None
     resource_id: str = Field(alias="resourceId")
     client_id: Optional[str] = Field(default=None, alias="clientId")
-    mode: str = Field(default="TEST")
+    mode: str
     external_id: Optional[str] = Field(default=None, alias="externalId")
     group_id: Optional[str] = Field(default=None, alias="groupId")
     amount: Optional[float] = None

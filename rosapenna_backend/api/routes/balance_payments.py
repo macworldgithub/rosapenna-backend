@@ -171,4 +171,10 @@ def list_staff_balance_attention(
             detail=f"Staff principal lacks required scopes: {sorted(required - principal.scopes)}",
             headers={"Cache-Control": "no-store"},
         )
-    return service.get_attention_list(property_id=property_id, limit=limit, cursor=cursor)
+    if property_id is not None and property_id.strip().upper() != service.property_id:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Staff attention is limited to the configured property.",
+            headers={"Cache-Control": "no-store"},
+        )
+    return service.get_attention_list(limit=limit, cursor=cursor)

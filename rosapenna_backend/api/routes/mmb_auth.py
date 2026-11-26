@@ -29,7 +29,6 @@ from rosapenna_backend.services.mmb_auth import (
     InvalidSessionError,
     MmbAuthError,
     MmbAuthService,
-    MmbOtpCooldownError,
 )
 
 router = APIRouter(prefix="/mmb", tags=["mmb authentication"])
@@ -54,12 +53,6 @@ def request_one_time_code(
         return auth_service.request_otp(
             booking_reference=request.booking_reference,
             last_name=request.last_name,
-        )
-    except MmbOtpCooldownError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=exc.message,
-            headers={"Retry-After": "60"},
         )
     except MmbAuthError as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.message)

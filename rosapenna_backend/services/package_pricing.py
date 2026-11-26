@@ -38,6 +38,7 @@ from rosapenna_backend.integrations.prommt import (
     PrommtCreatePaymentRequest,
     PrommtWebhookPayload,
 )
+from rosapenna_backend.integrations.prommt.client import PrommtError
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.tee_sheet import COURSES
@@ -171,6 +172,110 @@ class PackagePricingService:
         return updated_rules
 
 
+    def _get_prommt_test_deposit(self, **identifier) -> Optional[dict]:
+        if self.payments_collection is None:
+            return None
+        scope = {
+            **identifier,
+            "evidence_source": "prommt",
+            "is_test": True,
+            "purpose": "deposit",
+        }
+        matches = list(self.payments_collection.find(scope).limit(2))
+        if len(matches) > 1:
+            raise ValueError("Prommt TEST deposit identity is ambiguous.")
+        return next(iter(matches), None)
+
+    def apply_prommt_test_payment(self, event: PrommtWebhookPayload) -> Optional[dict]:
+        """Verify a signed TEST event against the exact stored deposit and provider record."""
+        if event.event not in {"PAID_SUCCESS", "SETTLED"}:
+            return None
+        payment = self._get_prommt_test_deposit(prommt_request_id=event.resource_id)
+        if payment is None:
+            return None
+        if event.external_id is not None and event.external_id != payment.get("booking_reference"):
+            raise ValueError("Prommt TEST event does not match the booking.")
+        return self._verify_prommt_test_deposit(payment, event_id=event.event_id)
+
+    def reconcile_prommt_test_payment(self, payment_id: str) -> Optional[dict]:
+        """Recover a missed TEST notice through an authenticated Prommt lookup."""
+        payment = self._get_prommt_test_deposit(payment_id=payment_id)
+        return None if payment is None else self._verify_prommt_test_deposit(payment)
+
+    def _verify_prommt_test_deposit(self, payment: dict, *, event_id: Optional[str] = None) -> dict:
+        if self.payments_collection is None:
+            raise ValueError("Prommt TEST payment storage is unavailable.")
+
+        booking_ref = payment.get("booking_reference")
+        resource_id = payment.get("prommt_request_id")
+        quote_id = payment.get("quote_id")
+        if not booking_ref or not resource_id or not quote_id:
+            raise ValueError("Prommt TEST payment is missing its booking, quote or provider reference.")
+        scope = {
+            "_id": payment["_id"],
+            "payment_id": payment["payment_id"],
+            "booking_reference": booking_ref,
+            "quote_id": quote_id,
+            "prommt_request_id": resource_id,
+            "evidence_source": "prommt",
+            "is_test": True,
+            "purpose": "deposit",
+            "amount": payment["amount"],
+            "currency": payment["currency"],
+        }
+        if payment["status"] == "verified_paid":
+            if payment.get("provider_reference") != resource_id or not payment.get("transaction_id"):
+                raise ValueError("Prommt TEST deposit is missing verified provider evidence.")
+            if event_id:
+                self._save_prommt_test_event(
+                    {**scope, "provider_reference": resource_id, "transaction_id": payment["transaction_id"]},
+                    event_id,
+                )
+            payment.pop("_id", None)
+            return payment
+
+        details = self.prommt_client.get_test_payment_details(resource_id)
+        if (
+            details.status not in {"PAID_SUCCESS", "SETTLED"}
+            or details.external_id != booking_ref
+            or details.amount != Decimal(payment["amount"])
+            or details.currency != payment["currency"]
+            or not details.transaction_id
+        ):
+            raise ValueError("Prommt TEST payment does not match the saved deposit.")
+
+        fields = {
+            "status": "verified_paid",
+            "transaction_id": details.transaction_id,
+            "provider_reference": resource_id,
+            "paid_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        }
+        if event_id:
+            fields["prommt_event_id"] = event_id
+        self.payments_collection.update_one(
+            {**scope, "status": {"$in": ["unpaid", "expired"]}},
+            {"$set": fields},
+        )
+        verified_scope = {
+            **scope,
+            "status": "verified_paid",
+            "provider_reference": resource_id,
+            "transaction_id": details.transaction_id,
+        }
+        verified = self.payments_collection.find_one(verified_scope, {"_id": 0})
+        if verified is None:
+            raise ValueError("Prommt TEST payment state changed during verification.")
+        if event_id and "prommt_event_id" not in verified:
+            self._save_prommt_test_event(verified_scope, event_id)
+        self._payments_cache[payment["payment_id"]] = verified
+        return verified
+
+    def _save_prommt_test_event(self, scope: dict, event_id: str) -> None:
+        self.payments_collection.update_one(
+            {**scope, "status": "verified_paid", "prommt_event_id": {"$exists": False}},
+            {"$set": {"prommt_event_id": event_id}},
+        )
+
     def process_prommt_webhook(
         self,
         raw_body: bytes,
@@ -184,38 +289,37 @@ class PackagePricingService:
         try:
             payload_json = json.loads(raw_body.decode("utf-8"))
             event = PrommtWebhookPayload.model_validate(payload_json)
-        except Exception as exc:
-            raise ValueError(f"Malformed Prommt webhook payload: {exc}") from exc
+        except ValueError:
+            raise ValueError("Malformed Prommt webhook payload") from None
 
         if not self.prommt_client.verify_timestamp(event.timestamp):
             raise ValueError("Webhook timestamp is expired or skewed")
+        if event.type != "PAYMENT_REQUEST" or event.mode not in {"TEST", "LIVE"}:
+            raise ValueError("Unsupported Prommt webhook type or mode")
 
-        # Correlate payment by resource_id or external_id
-        payment_doc = None
-        for p in self._payments_cache.values():
-            if p.get("prommt_request_id") == event.resource_id or p.get("booking_reference") == event.external_id:
-                payment_doc = p
-                break
-
-        if not payment_doc and self.payments_collection is not None:
-            doc = self.payments_collection.find_one({
-                "$or": [
-                    {"prommt_request_id": event.resource_id},
-                    {"booking_reference": event.external_id},
-                ]
-            })
-            if doc:
-                doc.pop("_id", None)
-                payment_doc = doc
+        if self.payments_collection is not None:
+            payment_doc = self.payments_collection.find_one({"prommt_request_id": event.resource_id})
+        else:
+            payment_doc = next(
+                (p for p in self._payments_cache.values() if p.get("prommt_request_id") == event.resource_id),
+                None,
+            )
 
         if not payment_doc:
-            raise LookupError(f"Payment record for Prommt resource {event.resource_id} not found")
+            raise LookupError("Prommt payment request not found")
 
+        payment_doc = {key: value for key, value in payment_doc.items() if key != "_id"}
         payment_id = payment_doc["payment_id"]
         booking_ref = payment_doc.get("booking_reference")
+        if (
+            payment_doc.get("evidence_source") != "prommt"
+            or (event.mode == "TEST") != (payment_doc.get("is_test") is True)
+            or (event.external_id and event.external_id != booking_ref)
+        ):
+            raise ValueError("Prommt event does not match the stored payment request")
 
-        # Idempotency check: duplicate event cannot credit twice
-        if payment_doc["status"] == "verified_paid" and event.event in ("PAID_SUCCESS", "SETTLED"):
+        previous_status = payment_doc["status"]
+        if previous_status == "verified_paid":
             logger.info("Prommt payment %s already verified_paid; idempotent return", payment_id)
             return {
                 "status": "already_processed",
@@ -225,42 +329,52 @@ class PackagePricingService:
 
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
         if event.event in ("PAID_SUCCESS", "SETTLED"):
+            details = self.prommt_client.get_payment_details(event.resource_id)
+            if (
+                details.status not in {"PAID_SUCCESS", "SETTLED"}
+                or details.amount != Decimal(payment_doc["amount"])
+                or details.currency != payment_doc["currency"]
+                or not booking_ref
+                or details.external_id != booking_ref
+                or not details.transaction_id
+            ):
+                raise ValueError("Prommt payment details do not match the stored payment request")
+            if self.linkage_service is None or not booking_ref:
+                raise ValueError("Prommt deposit has no booking payment record")
+            self.linkage_service.record_payment(
+                booking_reference=booking_ref,
+                payment=PaymentLedgerEntry(
+                    payment_id=payment_id,
+                    provider="prommt",
+                    payment_type=payment_doc.get("payment_type", "deposit"),
+                    amount=payment_doc["amount"],
+                    currency=details.currency,
+                    status="completed",
+                    provider_reference=event.resource_id,
+                    verified_at=dt.datetime.now(dt.timezone.utc),
+                ),
+                actor="prommt_webhook",
+            )
             payment_doc["status"] = "verified_paid"
             payment_doc["provider_reference"] = event.resource_id
+            payment_doc["transaction_id"] = details.transaction_id
             payment_doc["paid_at"] = now_str
 
-            if self.linkage_service and booking_ref:
-                try:
-                    ledger_entry = PaymentLedgerEntry(
-                        payment_id=payment_id,
-                        provider="prommt",
-                        payment_type=payment_doc.get("payment_type", "deposit"),
-                        amount=payment_doc["amount"],
-                        currency=payment_doc["currency"],
-                        status="completed",
-                        provider_reference=event.resource_id,
-                        verified_at=dt.datetime.now(dt.timezone.utc),
-                    )
-                    self.linkage_service.record_payment(
-                        booking_reference=booking_ref,
-                        payment=ledger_entry,
-                        actor="prommt_webhook",
-                    )
-                except Exception as exc:
-                    logger.warning("Could not update linkage ledger for %s: %s", booking_ref, exc)
-        elif event.event in ("PAID_FAILED", "REFUND_SUCCESS", "REFUND_FAILED", "CANCELED"):
+        elif event.event in ("PAID_FAILED", "ABANDONED", "CANCELED"):
             payment_doc["status"] = "failed"
             payment_doc["failure_reason"] = f"Prommt reported {event.event}"
             payment_doc["failed_at"] = now_str
         elif event.event == "EXPIRED":
             payment_doc["status"] = "expired"
 
-        self._payments_cache[payment_id] = payment_doc
-        if self.payments_collection is not None:
-            self.payments_collection.update_one(
-                {"payment_id": payment_id},
+        if self.payments_collection is not None and payment_doc["status"] != previous_status:
+            result = self.payments_collection.update_one(
+                {"payment_id": payment_id, "status": previous_status},
                 {"$set": payment_doc},
             )
+            if not result.modified_count:
+                raise ValueError("Prommt payment changed during processing; retry the event")
+        self._payments_cache[payment_id] = payment_doc
 
         return {
             "status": "success",
@@ -1008,6 +1122,9 @@ class PackagePricingService:
         if self.is_quote_expired(quote):
             raise ValueError(f"Quote {request.quote_id} has expired. Please refresh the quote to verify current rates.")
 
+        if sum(room.room_quantity for room in quote.itemized_rooms) > 1:
+            raise ValueError("Contact Reservations to book more than one room. No payment was requested.")
+
         if not request.accepted_terms:
             raise ValueError("Stay & Play terms and conditions must be explicitly accepted.")
 
@@ -1018,15 +1135,19 @@ class PackagePricingService:
 
         quote_hash = compute_quote_hash(quote)
         is_simulation = False
+        is_prommt_test = False
         if self.settings:
             payment_mode = getattr(self.settings, "payment_mode", "disabled").strip().lower()
             simulation_enabled = getattr(self.settings, "simulation_enabled", False) is True
             environment = getattr(self.settings, "environment", "").strip().lower()
-            if payment_mode not in {"disabled", "simulation"}:
+            if payment_mode not in {"disabled", "simulation", "prommt_test"}:
                 raise ValueError("Invalid payment mode.")
             if simulation_enabled != (payment_mode == "simulation"):
                 raise ValueError("Payment simulation settings are inconsistent.")
             is_simulation = payment_mode == "simulation" and simulation_enabled
+            is_prommt_test = payment_mode == "prommt_test"
+            if is_prommt_test and (environment != "test" or self.payments_collection is None):
+                raise ValueError("Prommt test checkout requires a test environment and database.")
             if is_simulation and (environment not in {"development", "test"} or self.payment_simulator is None):
                 raise ValueError("Payment simulation is unavailable in this environment.")
         elif self.payment_simulator is not None:
@@ -1084,6 +1205,7 @@ class PackagePricingService:
                     "country": request.residence_country,
                 },
                 "special_requests": request.special_requests,
+                "additional_guests": [guest.model_dump(mode="json") for guest in request.additional_guests],
                 "payment_url": payment_url,
                 "expires_at": expires_at.isoformat(),
                 "reminder_at": reminder_at.isoformat(),
@@ -1094,14 +1216,14 @@ class PackagePricingService:
                 "simulation_run_id": sim_run_id,
             }
         else:
-            if self.settings is not None:
+            if self.settings is not None and not is_prommt_test:
                 payment_mode = getattr(self.settings, "payment_mode", "disabled")
                 env_name = getattr(self.settings, "environment", "development")
                 if payment_mode == "disabled":
                     raise ValueError("Payment processing is currently disabled.")
                 if env_name in {"development", "test"}:
                     raise ValueError("Live payment processing is strictly prohibited in development and test environments.")
-            elif self.prommt_client.settings.allow_live_calls:
+            elif self.settings is None and self.prommt_client.settings.allow_live_calls:
                 raise ValueError("Live payment processing is strictly prohibited without configured production authorization.")
 
             payment_id = f"pay_{uuid.uuid4().hex}"
@@ -1122,8 +1244,12 @@ class PackagePricingService:
                 redirectUrl=f"{base_url}/booking/payment?payment_id={payment_id}&ref={booking_ref}",
                 paymentMethods=["CARD"],
             )
-            prommt_resp = self.prommt_client.create_payment_request(prommt_req)
-            payment_url = prommt_resp.payment_url or self.prommt_client.get_payment_link(prommt_resp.resource_id)
+            if is_prommt_test:
+                prommt_resp = self.prommt_client.create_test_checkout_link(prommt_req)
+                payment_url = prommt_resp.payment_url
+            else:
+                prommt_resp = self.prommt_client.create_payment_request(prommt_req)
+                payment_url = prommt_resp.payment_url or self.prommt_client.get_payment_link(prommt_resp.resource_id)
             if not payment_url:
                 payment_url = f"{base_url}/booking/payment?payment_id={payment_id}&intent_id={intent_id}&ref={booking_ref}"
 
@@ -1138,6 +1264,7 @@ class PackagePricingService:
                 "amount": quote.deposit_amount,
                 "currency": "EUR",
                 "provider": "prommt",
+                "purpose": "deposit",
                 "status": "unpaid",
                 "lead_guest": {
                     "first_name": request.lead_first_name,
@@ -1153,7 +1280,7 @@ class PackagePricingService:
                 "reserves_inventory": False,
                 "created_at": now_str,
                 "evidence_source": "prommt",
-                "is_test": False,
+                "is_test": is_prommt_test,
             }
 
         payment_doc["additional_guests"] = [
@@ -1176,7 +1303,9 @@ class PackagePricingService:
     def get_payment(self, payment_id: str) -> Optional[dict]:
         """Read a payment record, automatically transitioning to expired if 7 days passed."""
         doc = self._payments_cache.get(payment_id)
-        if not doc and self.payments_collection is not None:
+        if self.payments_collection is not None and (
+            not doc or getattr(self.settings, "payment_mode", None) == "prommt_test"
+        ):
             doc = self.payments_collection.find_one({"payment_id": payment_id})
             if doc:
                 doc.pop("_id", None)
@@ -1218,10 +1347,21 @@ class PackagePricingService:
         # Check expiry
         expires_dt = dt.datetime.fromisoformat(doc["expires_at"])
         if dt.datetime.now(dt.timezone.utc) > expires_dt and doc["status"] == "unpaid":
-            doc["status"] = "expired"
-            self._payments_cache[payment_id] = doc
             if self.payments_collection is not None:
-                self.payments_collection.update_one({"payment_id": payment_id}, {"$set": {"status": "expired"}})
+                result = self.payments_collection.update_one(
+                    {"payment_id": payment_id, "status": "unpaid", "expires_at": doc["expires_at"]},
+                    {"$set": {"status": "expired"}},
+                )
+                if not result.matched_count:
+                    # Another worker may have verified payment since this copy was read.
+                    doc = self.payments_collection.find_one({"payment_id": payment_id}, {"_id": 0})
+                    if doc is None:
+                        self._payments_cache.pop(payment_id, None)
+                        return None
+                    self._payments_cache[payment_id] = doc
+                    return doc
+            doc = {**doc, "status": "expired"}
+            self._payments_cache[payment_id] = doc
 
         return doc
 

@@ -16,7 +16,8 @@ from rosapenna_backend.core.logging import logger
 from rosapenna_backend.services.staff_audit import StaffAuditLog
 
 GATE_DOCUMENT_ID = "mmb_release_gate"
-DEFAULT_OFF_REASON = "Manage My Booking is disabled by default pending explicit written activation."
+DEFAULT_ON_REASON = "Manage My Booking is enabled by default."
+UNAVAILABLE_REASON = "Manage My Booking cannot read its settings."
 
 
 class MmbGateService:
@@ -35,7 +36,7 @@ class MmbGateService:
             "updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
             "updated_by": "system_default",
             "written_request_reference": None,
-            "reason": DEFAULT_OFF_REASON,
+            "reason": UNAVAILABLE_REASON,
             "environment": self.settings.environment,
         }
 
@@ -49,13 +50,11 @@ class MmbGateService:
             self.collection = None
 
     def is_enabled(self) -> bool:
-        """Evaluate the authoritative server gate. Defaults strictly to False (fail closed)."""
+        """Enable fresh databases and honor saved settings. Fail closed on read errors."""
         if self.collection is not None:
             try:
                 doc = self.collection.find_one({"_id": GATE_DOCUMENT_ID})
-                if doc:
-                    return doc.get("enabled") is True
-                return False
+                return doc is None or doc.get("enabled") is True
             except PyMongoError as err:
                 logger.warning("MongoDB read failed for MMB release gate (%s); failing closed", err)
                 return False
@@ -67,7 +66,7 @@ class MmbGateService:
         message = (
             "Manage My Booking is active."
             if active
-            else "Manage My Booking is currently disabled pending hotel written activation."
+            else "Manage My Booking is currently unavailable."
         )
         updated_at = None
         if self.collection is not None:
@@ -101,9 +100,11 @@ class MmbGateService:
                         "updated_at": doc.get("updated_at", self._memory_state["updated_at"]),
                         "updated_by": doc.get("updated_by", "system"),
                         "written_request_reference": doc.get("written_request_reference"),
-                        "reason": doc.get("reason", DEFAULT_OFF_REASON),
+                        "reason": doc.get("reason", UNAVAILABLE_REASON),
                         "environment": doc.get("environment", self.settings.environment),
                     }
+                else:
+                    state.update(enabled=True, reason=DEFAULT_ON_REASON)
             except Exception as exc:
                 logger.warning("Failed to fetch MMB gate state from MongoDB: %s", exc)
 

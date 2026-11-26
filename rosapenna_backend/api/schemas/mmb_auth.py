@@ -21,10 +21,11 @@ class RequestOtpRequest(BaseModel):
         pattern=BOOKING_REF_PATTERN,
         description="Canonical booking reference (e.g. RSP-20270514-XXXXXX).",
     )
-    last_name: str = Field(
+    last_name: Optional[str] = Field(
+        default=None,
         min_length=1,
         max_length=100,
-        description="Lead guest surname as recorded on the reservation.",
+        description="Optional surname for older clients.",
     )
 
 

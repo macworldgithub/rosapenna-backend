@@ -7,7 +7,10 @@ Zero live HTTP network calls to Prommt, Opera, or BRS; all tests run offline wit
 from __future__ import annotations
 
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
+from threading import Event
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 from mongomock import MongoClient
@@ -57,7 +60,7 @@ class FakeTeesheetCache:
     def __init__(self, times_data=None):
         self.times_data = times_data or {}
 
-    def get(self, date_val, course_id):
+    def get(self, date_val, course_id, *, force_refresh=False):
         key = (str(date_val), int(course_id))
         return self.times_data.get(
             key,
@@ -67,11 +70,11 @@ class FakeTeesheetCache:
                     "tee_times": [
                         {
                             "time": "10:00",
-                            "slots": {"1": "AVAILABLE", "2": "AVAILABLE"},
+                            "slots": {"1": {"status": "Available"}, "2": {"status": "Available"}},
                         },
                         {
                             "time": "14:00",
-                            "slots": {"1": "AVAILABLE", "2": "AVAILABLE"},
+                            "slots": {"1": {"status": "Available"}, "2": {"status": "Available"}},
                         },
                     ]
                 },
@@ -275,6 +278,167 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         # Verify email dispatched once in sandbox
         self.assertEqual(len(self.email_service._dispatched_emails), 1)
         self.assertEqual(self.email_service._dispatched_emails[0]["recipient"], "jack@example.com")
+
+    def test_notification_exception_keeps_verified_booking_complete(self):
+        req = ExecuteBookingOperationRequest(
+            idempotency_key="idemp_notification_exception_001",
+            operation_type="new_booking",
+            payment_id=self.sample_payment["payment_id"],
+            quote_id=self.sample_quote.quote_id,
+        )
+
+        saved_before_delivery = []
+
+        def fail_delivery(*, booking, idempotency_key):
+            operation_id = idempotency_key.removeprefix("email_")
+            saved_before_delivery.append(self.engine.get_operation(operation_id))
+            raise RuntimeError("test transport timed out")
+
+        with patch.object(self.email_service, "send_booking_confirmation", side_effect=fail_delivery) as send:
+            result = self.engine.execute_operation(req)
+            replay = self.engine.execute_operation(req)
+
+        self.assertEqual(send.call_count, 1)
+        self.assertEqual(saved_before_delivery[0].stage, "completed")
+        self.assertTrue(saved_before_delivery[0].readback_evidence.opera_verified)
+        self.assertTrue(saved_before_delivery[0].readback_evidence.brs_verified)
+        self.assertEqual(result.status, "confirmed")
+        self.assertIsNone(result.email_delivery_id)
+        self.assertEqual(replay.operation_id, result.operation_id)
+        self.assertEqual(replay.status, "confirmed")
+        saved = self.engine.get_operation(result.operation_id)
+        self.assertIn("outcome unknown", saved.stage_history[-1].details)
+        self.assertNotIn("timed out", saved.stage_history[-1].details)
+
+    def test_existing_linkage_for_different_round_does_not_confirm_booking(self):
+        req = ExecuteBookingOperationRequest(
+            idempotency_key="idemp_linkage_conflict_001",
+            operation_type="new_booking",
+            payment_id=self.sample_payment["payment_id"],
+            quote_id=self.sample_quote.quote_id,
+        )
+        save_linkage = self.linkage_service.link_booking
+
+        def return_conflicting_linkage(*args, **kwargs):
+            saved = save_linkage(*args, **kwargs)
+            saved.brs_rounds[0].brs_booking_id = "unrelated-test-booking"
+            return saved
+
+        with patch.object(self.linkage_service, "link_booking", side_effect=return_conflicting_linkage):
+            result = self.engine.execute_operation(req)
+
+        self.assertEqual(result.status, "unconfirmed_reconciliation")
+        self.assertEqual(self.engine.get_operation(result.operation_id).staff_alert.failed_stage, "linkage")
+        self.assertEqual(self.email_service._dispatched_emails, [])
+
+    def test_verified_prommt_test_payment_creates_only_sandbox_rounds(self):
+        self.pricing_service.settings = SimpleNamespace(environment="test", payment_mode="prommt_test")
+        self.sample_payment.update(evidence_source="prommt", is_test=True)
+        self.pricing_service._payments_cache[self.sample_payment["payment_id"]] = self.sample_payment
+        reader = self.pricing_service.teesheet_cache
+        with patch.object(reader, "get", wraps=reader.get) as availability:
+            result = self.engine.execute_operation(ExecuteBookingOperationRequest(
+                idempotency_key="prommt_test_sandbox_booking",
+                operation_type="new_booking",
+                payment_id=self.sample_payment["payment_id"],
+                quote_id=self.sample_quote.quote_id,
+            ))
+
+        self.assertEqual(result.status, "confirmed")
+        self.assertTrue(availability.call_args_list)
+        self.assertTrue(all(call.kwargs.get("force_refresh") is True for call in availability.call_args_list))
+        operation = self.engine.get_operation(result.operation_id)
+        round_ids = operation.vendor_references["brs_round_ids"]
+        self.assertEqual(len(round_ids), len(self.sample_quote.itemized_golf))
+        for round_id in round_ids:
+            saved = self.brs_client._sandbox_rounds[round_id]
+            self.assertEqual(saved.source, "verified_sandbox")
+            self.assertEqual(saved.status, "Reserved")
+            self.brs_client.release_round(round_id, operation.booking_reference)
+            self.assertEqual(self.brs_client._sandbox_rounds[round_id].status, "Released")
+
+    def test_prommt_test_payment_cannot_enter_live_brs_path(self):
+        self.pricing_service.settings = SimpleNamespace(environment="test", payment_mode="prommt_test")
+        self.sample_payment.update(evidence_source="prommt", is_test=True)
+        self.pricing_service._payments_cache[self.sample_payment["payment_id"]] = self.sample_payment
+        self.brs_settings.allow_live_writes = True
+        with patch.object(self.brs_client, "create_round") as create:
+            result = self.engine.execute_operation(ExecuteBookingOperationRequest(
+                idempotency_key="prommt_test_live_brs_rejected",
+                operation_type="new_booking",
+                payment_id=self.sample_payment["payment_id"],
+                quote_id=self.sample_quote.quote_id,
+            ))
+        self.assertEqual(result.status, "unconfirmed_reconciliation")
+        create.assert_not_called()
+
+    def test_concurrent_requests_with_different_keys_cannot_create_two_bookings(self):
+        second_engine = BookingOperationEngine(
+            database=self.db, pricing_service=self.pricing_service,
+            linkage_service=self.linkage_service, opera_client=self.opera_client,
+            brs_client=self.brs_client, email_service=self.email_service,
+        )
+        request = ExecuteBookingOperationRequest(
+            idempotency_key="concurrent_request_A", payment_id=self.sample_payment["payment_id"],
+            quote_id=self.sample_quote.quote_id,
+        )
+        entered = Event()
+        release = Event()
+        create = self.opera_client.create_reservation
+
+        def delayed_create(*args, **kwargs):
+            entered.set()
+            if not release.wait(timeout=5):
+                raise TimeoutError("Test worker was not released")
+            return create(*args, **kwargs)
+
+        with patch.object(self.opera_client, "create_reservation", side_effect=delayed_create) as write:
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first = pool.submit(self.engine.execute_operation, request)
+                try:
+                    self.assertTrue(entered.wait(timeout=5))
+                    repeated = second_engine.execute_operation(request.model_copy(update={
+                        "idempotency_key": "concurrent_request_B",
+                        "booking_reference": self.sample_payment["booking_reference"],
+                    }))
+                    self.assertEqual(repeated.status, "processing")
+                    self.assertEqual(write.call_count, 1)
+                finally:
+                    release.set()
+                finished = first.result(timeout=5)
+        self.assertEqual(finished.status, "confirmed")
+        self.assertEqual(repeated.operation_id, finished.operation_id)
+        self.assertEqual(self.engine.collection.count_documents({}), 1)
+
+    def test_unknown_booking_outcome_cannot_automatically_retry_after_restart(self):
+        request = ExecuteBookingOperationRequest(
+            idempotency_key="crashed_booking_request", payment_id=self.sample_payment["payment_id"],
+            quote_id=self.sample_quote.quote_id,
+        )
+        with patch.object(self.engine, "_execute_new_booking", side_effect=RuntimeError("interrupted")):
+            with self.assertRaises(RuntimeError):
+                self.engine.execute_operation(request)
+        restarted = BookingOperationEngine(
+            database=self.db, pricing_service=self.pricing_service,
+            linkage_service=self.linkage_service, opera_client=self.opera_client,
+            brs_client=self.brs_client, email_service=self.email_service,
+        )
+        with patch.object(restarted, "_execute_new_booking") as execute:
+            result = restarted.execute_operation(request)
+        self.assertEqual(result.status, "processing")
+        execute.assert_not_called()
+
+    def test_pending_live_brs_blocks_opera_before_any_vendor_write(self):
+        self.pricing_service.settings = SimpleNamespace(environment="production", payment_mode="disabled")
+        request = ExecuteBookingOperationRequest(
+            idempotency_key="production_blocked_before_opera", payment_id=self.sample_payment["payment_id"],
+            quote_id=self.sample_quote.quote_id,
+        )
+        with patch.object(self.opera_client, "create_reservation") as create:
+            result = self.engine.execute_operation(request)
+        self.assertEqual(result.status, "unconfirmed_reconciliation")
+        self.assertIn("No hotel or golf", result.message)
+        create.assert_not_called()
 
     def test_idempotent_duplicate_submission_replays_cleanly(self):
         """AC 1: Duplicate submissions return identical operation without duplicate writes or duplicate emails."""

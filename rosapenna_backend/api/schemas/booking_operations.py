@@ -121,7 +121,7 @@ class ExecuteBookingOperationResponse(BaseModel):
     booking_reference: str
     operation_type: OperationType
     stage: OperationStage
-    status: Literal["confirmed", "unconfirmed_reconciliation", "pending_payment"]
+    status: Literal["confirmed", "unconfirmed_reconciliation", "pending_payment", "processing"]
     message: str
     readback_verified: bool = False
     staff_review_required: bool = False

@@ -443,20 +443,16 @@ class BookingSession:
         # ── Stripe card details ──────────────────────────────────────────
         if req.card_details:
             card_ok = self.fill_stripe_card(page, req.card_details)
-            if card_ok:
-                if req.auto_pay:
-                    self.log_msg("auto_pay=True — clicking Pay button automatically...")
-                    self.click_pay_button(page)
-                else:
-                    self.log_msg(
-                        "Card details filled. auto_pay=False — browser left open. "
-                        "Review the form then click Pay manually."
-                    )
+            if not card_ok:
+                self.log_msg("Card entry failed. Review the open checkout before continuing.")
+                raise RuntimeError("Card entry failed")
+            if req.auto_pay:
+                if not self.click_pay_button(page):
+                    self.log_msg("Payment outcome unknown. Check BRS before attempting another payment.")
+                    raise RuntimeError("Pay action could not be verified")
+                self.log_msg("Pay clicked. BRS payment and booking confirmation still need verification.")
             else:
-                self.log_msg(
-                    "! Card fill failed — browser left open for manual card entry. "
-                    "Check the .temp folder for stripe_* debug screenshots."
-                )
+                self.log_msg("Card details entered. Review the open checkout before paying.")
         else:
             self.log_msg(
                 "No card_details provided — browser left open. "

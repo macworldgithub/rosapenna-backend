@@ -101,6 +101,8 @@ class EmailDeliveryService:
 
         ref = booking.get("booking_reference") or booking.get("booking_intent_id", "REF-PENDING")
         guest_name = f"{lead.get('first_name', '')} {lead.get('last_name', '')}".strip() or "Guest"
+        safe_guest_name = html.escape(guest_name)
+        safe_ref = html.escape(str(ref))
         subject = f"Booking Confirmation & Itinerary — Rosapenna Hotel & Golf Resort ({ref})"
 
         # 1. Render PDF Itinerary
@@ -123,10 +125,10 @@ class EmailDeliveryService:
                 <p style="color: #DBB155; margin: 5px 0 0 0; font-size: 13px;">Downings, Sheephaven Bay, Co. Donegal, Ireland</p>
             </div>
             <div style="padding: 25px 20px; border: 1px solid #e2e8f0; border-top: none;">
-                <p>Dear {guest_name},</p>
+                <p>Dear {safe_guest_name},</p>
                 <p>We are delighted to confirm your stay and play reservation with Rosapenna Hotel & Golf Resort.</p>
                 <div style="background-color: #f8fafc; border: 1px solid #cbd5e1; padding: 15px; border-radius: 4px; margin: 20px 0;">
-                    <p style="margin: 0 0 8px 0;"><b>Booking Reference:</b> <span style="color: #1A3323; font-size: 16px;">{ref}</span></p>
+                    <p style="margin: 0 0 8px 0;"><b>Booking Reference:</b> <span style="color: #1A3323; font-size: 16px;">{safe_ref}</span></p>
                     <p style="margin: 0;"><b>Status:</b> Confirmed & Guaranteed</p>
                 </div>
                 <p>Your complete itinerary, including hotel room allocation, championship links tee times, and verified payment ledger, is attached as a PDF document to this email.</p>

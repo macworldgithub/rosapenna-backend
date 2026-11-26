@@ -119,7 +119,7 @@ class TestN06RecoveryAndReconciliation(unittest.TestCase):
                 "tee_times": [
                     {
                         "time": "14:00",
-                        "slots": {"1": "AVAILABLE", "2": "AVAILABLE", "3": "AVAILABLE", "4": "AVAILABLE"},
+                        "slots": {str(i): {"status": "Available"} for i in range(4)},
                     }
                 ]
             },

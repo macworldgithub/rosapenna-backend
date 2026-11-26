@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
+from pydantic import ValidationError
 
-from rosapenna_backend.api.dependencies import get_package_pricing_service
+from rosapenna_backend.api.dependencies import get_booking_operation_engine, get_package_pricing_service
+from rosapenna_backend.api.schemas.booking_operations import ExecuteBookingOperationRequest
 from rosapenna_backend.api.schemas.packages import (
     PackagePaymentLinkRequest,
     PackagePaymentLinkResponse,
@@ -16,10 +19,14 @@ from rosapenna_backend.api.schemas.packages import (
     PaymentCallbackRequest,
     UpdatePackageRulesRequest,
 )
-from rosapenna_backend.api.security import COMMON_DEPS
+from rosapenna_backend.api.security import COMMON_DEPS, rate_limit
+from rosapenna_backend.integrations.prommt.schemas import PrommtWebhookPayload
+from rosapenna_backend.integrations.prommt.client import PrommtError
+from rosapenna_backend.services.booking_operations import BookingOperationEngine
 from rosapenna_backend.services.package_pricing import PackagePricingService
 
 router = APIRouter(prefix="/packages", tags=["packages"], dependencies=COMMON_DEPS)
+webhook_router = APIRouter(prefix="/packages", tags=["packages"], dependencies=[Depends(rate_limit)])
 
 
 @router.post(
@@ -68,6 +75,8 @@ def create_package_payment_link(
 ):
     try:
         return pricing_service.create_payment_link(request)
+    except PrommtError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
 
@@ -75,16 +84,28 @@ def create_package_payment_link(
 @router.get(
     "/payments/{payment_id}",
     summary="Lookup payment link status and lifecycle details",
-    description="Returns the current state (unpaid, verified_paid, failed, expired) of a payment link.",
+    description="Returns payment state and booking confirmation state without exposing reservation details.",
 )
 def get_package_payment(
     payment_id: str,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    operation_engine: BookingOperationEngine = Depends(get_booking_operation_engine),
 ):
     payment = pricing_service.get_payment(payment_id)
     if not payment:
-        raise HTTPException(status_code=404, detail=f"Payment link '{payment_id}' was not found.")
-    return {"status": payment["status"]}
+        raise HTTPException(status_code=404, detail="Payment link was not found.")
+
+    booking_status = "awaiting_payment"
+    booking_reference = payment.get("booking_reference")
+    quote_id = payment.get("quote_id")
+    if payment["status"] == "verified_paid":
+        booking_status = "pending_confirmation"
+        if booking_reference and quote_id:
+            booking_status = operation_engine.get_checkout_booking_status(
+                booking_reference, payment_id, quote_id,
+            )
+
+    return {"status": payment["status"], "booking_status": booking_status}
 
 
 @router.post(
@@ -97,16 +118,98 @@ def handle_payment_callback(
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
 ):
     raise HTTPException(status_code=503, detail="Legacy payment callback is disabled.")
-@router.post(
+
+
+
+@webhook_router.post(
     "/prommt/webhook",
-    summary="Prommt webhook (disabled pending verified contract)",
-    description="Unavailable until the provider verification and payment correlation contract is established.",
+    summary="Verify Prommt payment notifications in the isolated TEST environment",
 )
 async def handle_prommt_webhook(
     request: Request,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
 ):
-    raise HTTPException(status_code=503, detail="Provider payment webhook is disabled.")
+    client = pricing_service.prommt_client
+    if not _prommt_test_enabled(pricing_service) or not client.settings.webhook_secret.get_secret_value():
+        raise HTTPException(status_code=503, detail="Provider payment webhook is disabled.")
+
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 16384:
+            raise HTTPException(status_code=413, detail="Webhook body is too large.")
+        raw.extend(chunk)
+    body = bytes(raw)
+    if not client.verify_webhook_signature(body, request.headers.get("X-Signature", "")):
+        raise HTTPException(status_code=401, detail="Invalid Prommt signature.")
+    try:
+        event = PrommtWebhookPayload.model_validate_json(body)
+    except ValidationError:
+        raise HTTPException(status_code=400, detail="Invalid Prommt event.") from None
+    if event.mode != "TEST" or event.type != "PAYMENT_REQUEST":
+        raise HTTPException(status_code=400, detail="Only Prommt TEST payment requests are accepted.")
+    if not client.verify_timestamp(event.timestamp):
+        raise HTTPException(status_code=400, detail="Prommt event timestamp is outside the accepted window.")
+
+    try:
+        payment = await run_in_threadpool(pricing_service.apply_prommt_test_payment, event)
+    except PrommtError:
+        raise HTTPException(status_code=502, detail="Prommt TEST payment lookup failed.") from None
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Prommt TEST event did not match a saved deposit.") from None
+    if payment is None:
+        return {"status": "ignored"}
+
+    return await run_in_threadpool(_finish_prommt_test_payment, request, payment)
+
+
+@router.post(
+    "/payments/{payment_id}/reconcile-test",
+    summary="Recover a missed Prommt TEST payment notice using the provider status API",
+)
+def reconcile_prommt_test_payment(
+    payment_id: str,
+    request: Request,
+    pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+):
+    if not _prommt_test_enabled(pricing_service) or pricing_service.settings.security_bypass_in_dev:
+        raise HTTPException(status_code=503, detail="Authenticated Prommt TEST recovery is disabled.")
+    try:
+        payment = pricing_service.reconcile_prommt_test_payment(payment_id)
+    except PrommtError:
+        raise HTTPException(status_code=502, detail="Prommt TEST payment lookup failed.") from None
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Prommt TEST has no matching verified payment for this deposit.") from None
+    if payment is None:
+        raise HTTPException(status_code=404, detail="Prommt TEST deposit was not found.")
+
+    return _finish_prommt_test_payment(request, payment)
+
+
+def _prommt_test_enabled(pricing_service: PackagePricingService) -> bool:
+    settings = pricing_service.settings
+    client = pricing_service.prommt_client.settings
+    return (
+        settings is not None
+        and settings.environment == "test"
+        and settings.payment_mode == "prommt_test"
+        and client.mode == "TEST"
+        and not client.allow_live_calls
+        and pricing_service.payments_collection is not None
+    )
+
+
+def _finish_prommt_test_payment(request: Request, payment: dict) -> dict:
+    engine = get_booking_operation_engine(request)
+    operation = engine.execute_operation(
+        ExecuteBookingOperationRequest(
+            operation_type="new_booking",
+            booking_reference=payment["booking_reference"],
+            quote_id=payment["quote_id"],
+            payment_id=payment["payment_id"],
+            idempotency_key=f"prommt_test_{payment['payment_id']}",
+        )
+    )
+    return {"status": "processed", "booking_status": operation.status}
 
 
 @router.post(

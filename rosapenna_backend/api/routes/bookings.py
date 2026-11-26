@@ -20,7 +20,8 @@ router = APIRouter(dependencies=COMMON_DEPS)
         "Opens a real Chromium browser, navigates the tee sheet, fills all form fields, "
         "and optionally fills Stripe card details and clicks Pay.\n\n"
         "Supply `card_details` to automate card entry. Set `auto_pay: true` to also "
-        "click Pay — leave it false (default) to review before paying.\n\n"
+        "click Pay — leave it false (default) to review before paying. "
+        "The 'filled' status does not verify payment or a BRS reservation.\n\n"
         "Blocks up to `BOOKING_BOOKING_FILL_TIMEOUT_SECONDS` (default 90s); returns "
         "`status: 'running'` if still in progress — poll `GET /bookings/{id}`."
     ),
@@ -60,7 +61,7 @@ def create_booking(
         message=(
             "Form filled successfully. "
             + (
-                "Card details entered and Pay clicked automatically."
+                "Pay clicked. Check BRS for payment and booking confirmation."
                 if req.card_details and req.auto_pay
                 else "Card details entered — click Pay manually to complete."
                 if req.card_details

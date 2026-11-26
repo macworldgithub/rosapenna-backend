@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import datetime as dt
+from threading import Lock
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Dict, Optional
+from typing import Any, Dict, NoReturn, Optional
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -94,6 +95,24 @@ class BrsBookingClient:
         self.settings = settings or BrsSettings()
         # Non-production sandbox state
         self._sandbox_rounds: Dict[str, BrsRoundWriteResult] = {}
+        self._sandbox_lock = Lock()
+
+    def _save_sandbox_round(self, result: BrsRoundWriteResult, *, is_amendment: bool = False) -> None:
+        with self._sandbox_lock:
+            for existing in self._sandbox_rounds.values():
+                if is_amendment and existing.round_id == result.round_id:
+                    if existing.booking_reference != result.booking_reference:
+                        raise BrsConflictError("The round does not match this booking.")
+                    if existing.status in {"Cancelled", "Released"}:
+                        raise BrsConflictError("This booking was already released.")
+                    continue
+                if existing.round_id == result.round_id or (
+                    existing.status not in {"Cancelled", "Released"}
+                    and (existing.course_id, existing.date, existing.time)
+                    == (result.course_id, result.date, result.time)
+                ):
+                    raise BrsConflictError("This tee time already has a booking.")
+            self._sandbox_rounds[result.round_id] = result
 
     def _get_tenant(self, course_id: int) -> str:
         course = COURSES.get(course_id)
@@ -121,6 +140,10 @@ class BrsBookingClient:
             return self._create_sandbox_round(request, booking_reference)
 
         # 2. Live write gate: live BRS writes are blocked until authorized vendor contract is established
+        self.require_live_booking_writes()
+
+    def require_live_booking_writes(self) -> NoReturn:
+        """Reject coordinated live work before OPERA can write any inventory."""
         raise BrsProductionPolicyError(
             "Live BRS booking writes are not permitted: authorized live write API contract is not established."
         )
@@ -179,7 +202,7 @@ class BrsBookingClient:
                 expected={"course_id": course_id, "date": new_date, "time": new_time, "players": new_players},
                 actual={"course_id": amended.course_id, "date": amended.date, "time": amended.time, "players": amended.players},
             )
-            self._sandbox_rounds[request.round_id] = amended
+            self._save_sandbox_round(amended, is_amendment=True)
             return amended
 
         # Live write gate: live BRS writes are blocked until authorized vendor contract is established
@@ -240,7 +263,7 @@ class BrsBookingClient:
             # Readback check for caddy details
             if amended.caddy_request != caddy_request:
                 raise BrsReadbackMismatchError("BRS caddy request readback verification failed.")
-            self._sandbox_rounds[clean_id] = amended
+            self._save_sandbox_round(amended, is_amendment=True)
             return amended
 
         # Live write gate: live BRS writes are blocked until authorized vendor contract is established
@@ -258,8 +281,12 @@ class BrsBookingClient:
                 "Live BRS booking writes are not permitted: authorized live write API contract is not established."
             )
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
-        if round_id in self._sandbox_rounds:
-            self._sandbox_rounds[round_id].status = "Released"
+        with self._sandbox_lock:
+            existing = self._sandbox_rounds.get(round_id)
+            if existing is not None:
+                if existing.booking_reference != booking_reference:
+                    raise BrsConflictError("The round does not match this booking.")
+                existing.status = "Released"
 
         return BrsRoundReleaseResult(
             success=True,
@@ -317,24 +344,21 @@ class BrsBookingClient:
             currency=request.currency,
             status="Reserved",
             caddy_request=request.caddy_request,
-            verified_via_readback=True,
+            verified_via_readback=False,
             source="verified_sandbox",
             created_at=now_str,
             idempotency_replayed=False,
         )
-        self._verify_readback(
-            expected={
-                "course_id": request.course_id,
-                "date": request.date,
-                "time": request.time,
-                "players": request.players,
-            },
-            actual={
-                "course_id": res.course_id,
-                "date": res.date,
-                "time": res.time,
-                "players": res.players,
-            },
-        )
-        self._sandbox_rounds[round_id] = res
-        return res
+        self._save_sandbox_round(res)
+        with self._sandbox_lock:
+            current = self._sandbox_rounds.get(round_id)
+            if (current is None or current.booking_reference != booking_reference
+                    or current.brs_booking_id != brs_booking_id or current.status != "Reserved"):
+                raise BrsReadbackMismatchError("The saved test round could not be verified.")
+            fields = {"course_id", "date", "time", "players"}
+            self._verify_readback(
+                expected=request.model_dump(include=fields),
+                actual=current.model_dump(include=fields),
+            )
+            current.verified_via_readback = True
+            return current.model_copy(deep=True)

@@ -17,12 +17,14 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import hashlib
+from threading import Lock
 from typing import Any, Dict, List, Optional
 import uuid
 
 from pymongo import ASCENDING
 from pymongo.collection import Collection
 from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from rosapenna_backend.api.schemas.booking_linkage import (
     BrsRoundDetails,
@@ -48,6 +50,7 @@ from rosapenna_backend.api.schemas.mmb_amendments import AmendmentOfferSnapshot
 from rosapenna_backend.api.schemas.packages import PackageGuestName, PackageQuoteResponse
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient, BrsWriteError
+from rosapenna_backend.integrations.brs.tee_sheet import tee_time_is_empty
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegrationError
 from rosapenna_backend.services.booking_linkage import BookingLinkageService, LinkageConflictError
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
@@ -96,6 +99,8 @@ class BookingOperationEngine:
         )
         self._in_memory_records: Dict[str, Dict[str, Any]] = {}
         self._in_memory_by_id: Dict[str, Dict[str, Any]] = {}
+        self._new_booking_lock = Lock()
+        self._local_started: set[str] = set()
 
         if self.collection is not None:
             self._init_indexes()
@@ -169,6 +174,44 @@ class BookingOperationEngine:
                 results.append(BookingOperationRecord.model_validate(doc))
         return results
 
+    def get_checkout_booking_status(self, booking_reference: str, payment_id: str, quote_id: str) -> str:
+        """Return a limited guest status for the exact paid checkout."""
+        scope = {
+            "booking_reference": booking_reference,
+            "operation_type": "new_booking",
+            "payment_id": payment_id,
+            "quote_id": quote_id,
+        }
+        if self.collection is not None:
+            record = self.collection.find_one(
+                scope,
+                {"_id": 0, "stage": 1, "payment_verified": 1, "staff_alert": 1,
+                 "readback_evidence.opera_verified": 1, "readback_evidence.brs_verified": 1},
+                sort=[("updated_at", -1)],
+            )
+        else:
+            record = max(
+                (doc for doc in self._in_memory_by_id.values()
+                 if all(doc.get(key) == value for key, value in scope.items())),
+                key=lambda doc: doc["updated_at"],
+                default=None,
+            )
+
+        if record is None:
+            return "pending_confirmation"
+        if record.get("stage") == "completed":
+            evidence = record.get("readback_evidence") or {}
+            if (
+                record.get("payment_verified") is True
+                and evidence.get("opera_verified") is True
+                and evidence.get("brs_verified") is True
+            ):
+                return "confirmed"
+            return "needs_review"
+        if record.get("stage") == "unconfirmed_reconciliation" or record.get("staff_alert") is not None:
+            return "needs_review"
+        return "pending_confirmation"
+
     def execute_operation(
         self,
         request: ExecuteBookingOperationRequest,
@@ -177,16 +220,29 @@ class BookingOperationEngine:
         key_hash = hash_idempotency_key(request.idempotency_key)
         existing = self._find_record_by_key_hash(key_hash)
 
-        # For new_booking: check if a canonical operation already exists for this booking_reference
-        if existing is None and request.operation_type == "new_booking" and request.booking_reference:
-            ops = self.get_operations_for_booking(request.booking_reference)
-            for op in ops:
-                if op.operation_type == "new_booking":
-                    existing = op
-                    break
+        payment = self.pricing_service.get_payment(request.payment_id) if request.operation_type == "new_booking" and request.payment_id else None
+        paid_booking_ref = payment.get("booking_reference") if payment else None
+        if (paid_booking_ref and request.booking_reference in {None, paid_booking_ref}
+                and request.quote_id in {None, payment.get("quote_id")}):
+            key_hash = f"booking:{hash_idempotency_key(paid_booking_ref)}"
+            existing = self._find_record_by_key_hash(key_hash) or existing
+            if existing is None:
+                existing = next((op for op in self.get_operations_for_booking(paid_booking_ref)
+                                 if op.operation_type == "new_booking"
+                                 and op.payment_id == request.payment_id
+                                 and op.quote_id in {None, payment.get("quote_id")}), None)
 
         # 1. Idempotency Check
         if existing is not None:
+            if (
+                existing.operation_type != request.operation_type
+                or (request.booking_reference and request.booking_reference != existing.booking_reference)
+                or (request.operation_type == "new_booking" and (
+                    existing.payment_id != request.payment_id
+                    or (existing.quote_id and request.quote_id and existing.quote_id != request.quote_id)
+                ))
+            ):
+                raise OperationConflictError("This operation belongs to a different booking, quote or payment.")
             if existing.stage == "completed":
                 logger.info("Idempotent replay of completed operation %s", existing.operation_id)
                 return ExecuteBookingOperationResponse(
@@ -223,7 +279,7 @@ class BookingOperationEngine:
         else:
             # Initialize fresh operation record
             op_id = f"OP-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6].upper()}"
-            booking_ref = request.booking_reference or f"RSP-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
+            booking_ref = request.booking_reference or paid_booking_ref or f"RSP-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
 
             record = BookingOperationRecord(
                 operation_id=op_id,
@@ -238,12 +294,68 @@ class BookingOperationEngine:
                     StageHistoryEntry(stage="initialized", details="Operation initialized")
                 ],
             )
-            self._save_record(record)
+            if record.operation_type == "new_booking":
+                if not self._insert_new_booking(record):
+                    # Reload the winning record and apply the same scope checks.
+                    return self.execute_operation(request)
+            else:
+                self._save_record(record)
 
         if record.operation_type == "new_booking":
-            return self._execute_new_booking(record, request)
+            return self._run_new_booking_once(record, request)
         else:
             return self._execute_amendment(record, request)
+
+    def _insert_new_booking(self, record: BookingOperationRecord) -> bool:
+        if self.collection is not None:
+            try:
+                self.collection.insert_one(record.model_dump(mode="json", exclude={"confirmed_event", "confirmation"}))
+                return True
+            except DuplicateKeyError:
+                return False
+        with self._new_booking_lock:
+            if record.idempotency_key_hash in self._in_memory_records:
+                return False
+            self._save_record(record)
+            return True
+
+    def _run_new_booking_once(
+        self, record: BookingOperationRecord, request: ExecuteBookingOperationRequest,
+    ) -> ExecuteBookingOperationResponse:
+        """Retain the claim after an unknown outcome. Staff must verify before another write."""
+        if self.collection is not None:
+            scope = {"operation_id": record.operation_id, "stage": "initialized"}
+            claimed = self.collection.update_one(
+                {**scope, "new_booking_started": {"$exists": False}},
+                {"$set": {"new_booking_started": _utc_now_str()}},
+            ).modified_count == 1
+        else:
+            with self._new_booking_lock:
+                claimed = record.stage == "initialized" and record.operation_id not in self._local_started
+                if claimed:
+                    self._local_started.add(record.operation_id)
+        if not claimed:
+            latest = self.get_operation(record.operation_id) or record
+            if latest.stage in {"completed", "unconfirmed_reconciliation"}:
+                return self.execute_operation(request)
+            return ExecuteBookingOperationResponse(
+                operation_id=latest.operation_id,
+                booking_reference=latest.booking_reference,
+                operation_type=latest.operation_type,
+                stage=latest.stage,
+                status="processing",
+                message="Booking is in progress or has an unclear result. Check the saved records before attempting it again.",
+                replayed=True,
+                created_at=latest.created_at,
+            )
+        result = self._execute_new_booking(record, request)
+        if result.status == "pending_payment":
+            if self.collection is not None:
+                self.collection.update_one(scope, {"$unset": {"new_booking_started": ""}})
+            else:
+                with self._new_booking_lock:
+                    self._local_started.discard(record.operation_id)
+        return result
 
     def _execute_new_booking(
         self,
@@ -299,32 +411,54 @@ class BookingOperationEngine:
                 created_at=record.created_at,
             )
 
-        # Simulated payment must never authorize real inventory operations.
+        # Test payment must never authorize real inventory operations or guest email.
         settings = getattr(self.pricing_service, "settings", None)
+        payment_mode = getattr(settings, "payment_mode", None)
+        environment = getattr(settings, "environment", None)
+        opera_settings = getattr(self.opera_client, "settings", None)
+        brs_settings = getattr(self.brs_client, "settings", None)
         if (payment_doc.get("evidence_source") == "simulation"
                 or payment_doc.get("is_test") is True
-                or getattr(settings, "payment_mode", None) == "simulation"):
+                or payment_mode in {"simulation", "prommt_test"}):
             run_id = getattr(settings, "simulation_run_id", None)
-            environment = getattr(settings, "environment", None)
-            opera_settings = getattr(self.opera_client, "settings", None)
-            brs_settings = getattr(self.brs_client, "settings", None)
-            simulation_safe = (
-                settings is not None
-                and environment in {"development", "test"}
-                and getattr(settings, "payment_mode", None) == "simulation"
+            simulation_payment = (
+                environment in {"development", "test"}
+                and payment_mode == "simulation"
                 and getattr(settings, "simulation_enabled", False) is True
                 and bool(run_id)
                 and payment_doc.get("simulation_run_id") == run_id
                 and payment_doc.get("evidence_source") == "simulation"
+            )
+            prommt_test_payment = (
+                environment == "test"
+                and payment_mode == "prommt_test"
+                and payment_doc.get("evidence_source") == "prommt"
+            )
+            test_booking_safe = (
+                (simulation_payment or prommt_test_payment)
                 and payment_doc.get("is_test") is True
                 and getattr(opera_settings, "allow_live_writes", None) is False
                 and getattr(brs_settings, "allow_live_writes", None) is False
+                and getattr(self.email_service.settings, "allow_live_send", None) is False
             )
-            if not simulation_safe:
+            if not test_booking_safe:
                 return self._fail_to_reconciliation(
                     record=record,
                     failed_stage="simulation_safety",
                     reason="Test payment cannot authorize this booking configuration.",
+                    payment_doc=payment_doc,
+                )
+
+        if (environment in {"staging", "production"}
+                or getattr(opera_settings, "allow_live_writes", False) is True
+                or getattr(brs_settings, "allow_live_writes", False) is True):
+            try:
+                self.brs_client.require_live_booking_writes()
+            except BrsWriteError:
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="live_booking_unavailable",
+                    reason="BRS live booking is not enabled. No hotel or golf reservation was written.",
                     payment_doc=payment_doc,
                 )
 
@@ -658,25 +792,54 @@ class BookingOperationEngine:
                 reason=f"Confirmed online stay & play via operation {record.operation_id}",
             )
             # F14 Safe Operation Engine establishes authoritative linkage
-            self.linkage_service.link_booking(
+            linkage = self.linkage_service.link_booking(
                 link_req,
                 actor="safe_booking_operation_engine",
                 unassigned_guests=unassigned_guests,
             )
         except Exception as exc:
-            logger.error("Authoritative linkage failed for %s: %s", record.booking_reference, exc)
+            logger.error("Authoritative linkage failed for %s (%s)", record.operation_id, type(exc).__name__)
             return self._fail_to_reconciliation(
                 record=record,
                 failed_stage="linkage",
-                reason=f"Authoritative booking linkage failed: {exc}",
+                reason="Authoritative booking linkage failed. Verify the saved booking before retrying.",
                 payment_doc=payment_doc,
                 opera_res_id=opera_res_id,
                 brs_round_ids=existing_round_ids,
             )
 
-        # -------------------------------------------------------------
-        # Step 6: Send Formal Confirmation Email and Itinerary PDF (F12)
-        # -------------------------------------------------------------
+        expected_payment = link_req.payments[0]
+        if (
+            linkage.status != "linked"
+            or linkage.lead_guest != link_req.lead_guest
+            or linkage.opera_stay != link_req.manual_opera_stay
+            or linkage.brs_rounds != link_req.brs_rounds
+            or not any(
+                payment.payment_id == expected_payment.payment_id
+                and payment.status == expected_payment.status
+                and payment.currency == expected_payment.currency
+                and payment.amount == expected_payment.amount
+                for payment in linkage.payments
+            )
+        ):
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="linkage",
+                reason="The saved linkage does not match the verified booking and payment.",
+                payment_doc=payment_doc,
+                opera_res_id=opera_res_id,
+                brs_round_ids=existing_round_ids,
+            )
+
+        # Save the verified booking before attempting notification delivery.
+        record.stage = "completed"
+        record.completed_at = _utc_now_str()
+        record.updated_at = record.completed_at
+        record.stage_history.append(
+            StageHistoryEntry(stage="completed", details="Hotel, golf, and booking linkage verified.")
+        )
+        self._save_record(record)
+
         deposit_val = str(getattr(quote, "deposit_amount", "0.00"))
         balance_val = str(getattr(quote, "balance_amount", "0.00"))
         due_val = str(getattr(quote, "balance_due_date", quote.arrival_date))
@@ -709,23 +872,20 @@ class BookingOperationEngine:
             },
         }
 
-        email_result = self.email_service.send_booking_confirmation(
-            booking=booking_summary,
-            idempotency_key=f"email_{record.operation_id}",
-        )
-        record.email_delivery_id = email_result.delivery_id
+        try:
+            email_result = self.email_service.send_booking_confirmation(
+                booking=booking_summary,
+                idempotency_key=f"email_{record.operation_id}",
+            )
+            record.email_delivery_id = email_result.delivery_id
+            delivery_detail = f"Confirmation notification result: {email_result.status}."
+        except Exception as exc:
+            logger.warning("Confirmation notification outcome unknown for %s (%s)", record.operation_id, type(exc).__name__)
+            delivery_detail = "Confirmation notification outcome unknown. Verify delivery before retrying."
 
-        # -------------------------------------------------------------
-        # Step 7: Complete Operation
-        # -------------------------------------------------------------
-        record.stage = "completed"
-        record.completed_at = _utc_now_str()
         record.updated_at = _utc_now_str()
         record.stage_history.append(
-            StageHistoryEntry(
-                stage="completed",
-                details=f"Operation completed. Confirmation email dispatched ({email_result.delivery_id}).",
-            )
+            StageHistoryEntry(stage="completed", details=delivery_detail)
         )
         self._save_record(record)
 
@@ -741,7 +901,7 @@ class BookingOperationEngine:
             operation_type=record.operation_type,
             stage="completed",
             status="confirmed",
-            message="Booking successfully confirmed, inventory secured across Opera and BRS, and itinerary dispatched.",
+            message="Booking confirmed across Opera and BRS. " + delivery_detail,
             readback_verified=True,
             staff_review_required=False,
             email_delivery_id=record.email_delivery_id,
@@ -922,38 +1082,26 @@ class BookingOperationEngine:
         courses_by_name = {c["name"].lower(): cid for cid, c in COURSES.items()}
         proposed_golf = getattr(offer, "proposed_golf_rounds", getattr(offer, "proposed_golf", []))
 
-        for g_round in proposed_golf:
-            c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower(), 1)
-            already_held = any(
-                (str(r.date) == str(g_round.date))
-                and r.course_id == c_id
-                and r.time == g_round.time
-                for r in original_rounds
-            )
-            if not already_held:
-                try:
-                    sheet_res = self.pricing_service.teesheet_cache.get(
-                        str(g_round.date), c_id
-                    )
-                    sheet_data = sheet_res.get("data", {}) if sheet_res else {}
-                    times = sheet_data.get("tee_times", [])
-                    slot_ok = False
-                    for t in times:
-                        if t.get("time") == g_round.time:
-                            slots = t.get("slots", {})
-                            avail = sum(1 for s in slots.values() if s in ("AVAILABLE", "RESERVED_ONLINE"))
-                            if avail >= g_round.players:
-                                slot_ok = True
-                                break
-                    if not slot_ok:
-                        return self._fail_to_reconciliation(
-                            record=record,
-                            failed_stage="inventory_precheck",
-                            reason=f"Golf round on course {c_id} at {g_round.time} on {g_round.date} is no longer available.",
-                            payment_doc=payment_doc,
-                        )
-                except Exception as exc:
-                    logger.warning("BRS tee sheet pre-write check warning: %s", exc)
+        saved_replacements = record.vendor_references.get("replacement_brs_round_ids", [])
+        for g_round in proposed_golf[len(saved_replacements):]:
+            c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower())
+            try:
+                if c_id not in COURSES:
+                    raise ValueError("Unknown BRS course")
+                sheet_res = self.pricing_service.teesheet_cache.get(g_round.date, c_id, force_refresh=True)
+                slot_ok = not any(
+                    (str(r.date), r.course_id, r.time) == (str(g_round.date), c_id, g_round.time)
+                    for r in original_rounds
+                ) and tee_time_is_empty(sheet_res, g_round.time, g_round.players)
+            except Exception:
+                slot_ok = False
+            if not slot_ok:
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="inventory_precheck",
+                    reason=f"Replacement tee time on course {c_id} at {g_round.time} on {g_round.date} is occupied or could not be verified as empty.",
+                    payment_doc=payment_doc,
+                )
 
         # ---------------------------------------------------------------------
         # Step 4: Coordinated writes with strict readback (AC 5, AC 7)
@@ -1010,7 +1158,7 @@ class BookingOperationEngine:
                 if i < len(replacement_round_ids):
                     continue
                 try:
-                    c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower(), 1)
+                    c_id = getattr(g_round, "course_id", None) or courses_by_name.get(g_round.course_name.lower())
                     round_price_val = getattr(g_round, "price", None) or getattr(g_round, "round_price_total", "150.00")
                     round_price_str = f"{Decimal(str(round_price_val)):.2f}"
                     brs_req = CreateBrsRoundRequest(
@@ -1127,7 +1275,7 @@ class BookingOperationEngine:
             updated_rounds = [
                 BrsRoundDetails(
                     round_id=rnd_id,
-                    course_id=getattr(g, "course_id", None) or courses_by_name.get(g.course_name.lower(), 1),
+                    course_id=getattr(g, "course_id", None) or courses_by_name.get(g.course_name.lower()),
                     course_name=g.course_name,
                     date=g.date,
                     time=g.time,
@@ -1335,24 +1483,12 @@ class BookingOperationEngine:
         for round_spec in golf_rounds:
             try:
                 sheet_res = self.pricing_service.teesheet_cache.get(
-                    round_spec.date, round_spec.course_id
+                    round_spec.date, round_spec.course_id, force_refresh=True
                 )
-                sheet_data = sheet_res.get("data", {})
-                times = sheet_data.get("tee_times", [])
-
-                matching_slot = None
-                for t in times:
-                    if t.get("time") == round_spec.time:
-                        slots = t.get("slots", {})
-                        avail = sum(1 for status in slots.values() if status == "AVAILABLE")
-                        if avail >= round_spec.players:
-                            matching_slot = t
-                            break
-
-                if not matching_slot:
+                if not tee_time_is_empty(sheet_res, round_spec.time, round_spec.players):
                     return (
                         False,
-                        f"Tee time at {round_spec.time} on {round_spec.date} on course {round_spec.course_id} is no longer available for {round_spec.players} players.",
+                        f"Tee time at {round_spec.time} on {round_spec.date} on course {round_spec.course_id} is occupied or cannot be verified as empty.",
                     )
             except Exception as exc:
                 return False, f"BRS tee-sheet recheck error: {exc}"

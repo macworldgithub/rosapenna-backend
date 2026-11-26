@@ -4,6 +4,11 @@ from __future__ import annotations
 
 import datetime as dt
 import asyncio
+import hashlib
+import hmac
+import json
+import secrets
+from uuid import uuid4
 import unittest
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
@@ -22,11 +27,19 @@ from rosapenna_backend.api.schemas.packages import (
     PackageRulesConfig,
 )
 from rosapenna_backend.config import Settings
-from rosapenna_backend.api.routes.packages import handle_payment_callback, handle_prommt_webhook
-from fastapi import HTTPException
+from rosapenna_backend.api.routes.packages import (
+    get_package_payment, handle_payment_callback, handle_prommt_webhook, reconcile_prommt_test_payment,
+)
+from fastapi import HTTPException, Request
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient
 from rosapenna_backend.integrations.opera.client import OperaClient
 from rosapenna_backend.integrations.payments.simulation import PaymentSimulator
+from rosapenna_backend.integrations.prommt.client import PrommtClient, PrommtSettings
+from rosapenna_backend.integrations.prommt.schemas import (
+    PrommtPaymentDetailsResponse,
+    PrommtPaymentRequestResponse,
+    PrommtWebhookPayload,
+)
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
@@ -125,11 +138,11 @@ class TestN06CommitJourney(unittest.TestCase):
                 "tee_times": [
                     {
                         "time": "14:00",
-                        "slots": {"1": "AVAILABLE", "2": "AVAILABLE", "3": "AVAILABLE", "4": "AVAILABLE"},
+                        "slots": {str(i): {"status": "Available"} for i in range(4)},
                     },
                     {
                         "time": "10:00",
-                        "slots": {"1": "AVAILABLE", "2": "AVAILABLE", "3": "AVAILABLE", "4": "AVAILABLE"},
+                        "slots": {str(i): {"status": "Available"} for i in range(4)},
                     },
                 ]
             },
@@ -315,12 +328,208 @@ class TestN06CommitJourney(unittest.TestCase):
         service.process_payment_callback.assert_not_called()
 
     def test_unverified_provider_webhook_fails_closed(self):
-        """The public webhook cannot accept payment evidence before its contract is verified."""
+        """The webhook stays off outside the isolated Prommt TEST profile."""
         service = MagicMock()
         with self.assertRaises(HTTPException) as raised:
             asyncio.run(handle_prommt_webhook(MagicMock(), service))
         self.assertEqual(raised.exception.status_code, 503)
-        service.process_prommt_webhook.assert_not_called()
+        service.apply_prommt_test_payment.assert_not_called()
+
+    def test_prommt_test_webhook_checks_signatures_and_saves_one_booking(self):
+        self.settings.payment_mode = "prommt_test"
+        self.settings.simulation_enabled = False
+        secret = secrets.token_urlsafe(32)
+        client = PrommtClient(PrommtSettings(
+            PROMMT_MODE="TEST", PROMMT_WEBHOOK_SECRET=secret, PROMMT_ALLOW_LIVE_CALLS=False,
+        ))
+        self.pricing_service.prommt_client = client
+        quote = make_mock_available_quote()
+        quote.guest_count = 2
+        self.pricing_service._cache_and_return_quote(quote)
+        resource_id = str(uuid4())
+
+        with patch.object(client, "create_test_checkout_link", return_value=PrommtPaymentRequestResponse(
+            resourceId=resource_id, url="https://pay.prommt.com/link/test-fixture",
+        )):
+            link = self.pricing_service.create_payment_link(PackagePaymentLinkRequest(
+                quote_id=quote.quote_id, lead_first_name="Test", lead_last_name="Guest",
+                lead_email="guest@example.invalid", lead_phone="+442079460000",
+                additional_guests=[{"first_name": "Test", "last_name": "Companion"}],
+                accepted_terms=True,
+            ))
+
+        event = {
+            "eventId": str(uuid4()), "resourceId": resource_id, "type": "PAYMENT_REQUEST",
+            "event": "PAID_SUCCESS", "mode": "TEST", "externalId": link.booking_reference,
+            "timestamp": int(dt.datetime.now(dt.timezone.utc).timestamp() * 1000),
+        }
+        details = PrommtPaymentDetailsResponse(
+            status="PAID_SUCCESS", amount=Decimal(quote.deposit_amount), currency="EUR",
+            externalId=link.booking_reference, transactionId="test-transaction",
+        )
+
+        def deliver(payload, valid_signature=True):
+            body = json.dumps(payload).encode()
+            signature = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+
+            async def receive():
+                return {"type": "http.request", "body": body, "more_body": False}
+
+            request = Request({"type": "http", "headers": [
+                (b"x-signature", (signature if valid_signature else "invalid").encode())
+            ]}, receive)
+            return asyncio.run(handle_prommt_webhook(request, self.pricing_service))
+
+        route = "rosapenna_backend.api.routes.packages.get_booking_operation_engine"
+        with patch(route, return_value=self.engine), patch.object(
+            client, "get_test_payment_details", return_value=details,
+        ) as lookup:
+            for payload, signature_ok, status in (
+                (event, False, 401),
+                (event | {"mode": "LIVE"}, True, 400),
+                ({k: v for k, v in event.items() if k != "mode"}, True, 400),
+                (event | {"timestamp": 1000}, True, 400),
+                (event | {"externalId": "wrong-booking"}, True, 409),
+            ):
+                with self.subTest(status=status), self.assertRaises(HTTPException) as exc:
+                    deliver(payload, signature_ok)
+                self.assertEqual(exc.exception.status_code, status)
+            lookup.assert_not_called()
+            self.assertEqual(deliver(event | {"event": "PAID_FAILED"}), {"status": "ignored"})
+            self.assertEqual(len(self.brs_client._sandbox_rounds), 0)
+            lookup.return_value = details.model_copy(update={"amount": Decimal("0.01")})
+            with self.assertRaises(HTTPException) as exc:
+                deliver(event)
+            self.assertEqual(exc.exception.status_code, 409)
+            self.assertEqual(self.db.package_payments.find_one({"payment_id": link.payment_id})["status"], "unpaid")
+
+            lookup.return_value = details
+            # Simulate interruption after the payment is saved, before booking starts.
+            with patch.object(self.engine, "execute_operation", side_effect=RuntimeError("booking interrupted")):
+                with self.assertRaisesRegex(RuntimeError, "booking interrupted"):
+                    deliver(event)
+            saved = self.db.package_payments.find_one({"payment_id": link.payment_id})
+            self.assertEqual(saved["status"], "verified_paid")
+            self.assertEqual(saved["prommt_event_id"], event["eventId"])
+            self.assertEqual(self.db.booking_operations.count_documents({}), 0)
+
+            self.assertEqual(deliver(event)["booking_status"], "confirmed")
+            self.assertEqual(deliver(event)["booking_status"], "confirmed")
+            self.assertEqual(lookup.call_count, 2)
+            self.assertEqual(self.db.booking_operations.count_documents({"booking_reference": link.booking_reference}), 1)
+            self.assertEqual(len(self.opera_client._sandbox_reservations), 1)
+            self.assertEqual(len(self.brs_client._sandbox_rounds), 2)
+
+            def checkout_status():
+                return get_package_payment(link.payment_id, self.pricing_service, self.engine)
+
+            self.assertEqual(checkout_status(), {"status": "verified_paid", "booking_status": "confirmed"})
+            self.db.booking_operations.update_one(
+                {"booking_reference": link.booking_reference},
+                {"$set": {"readback_evidence.brs_verified": False}},
+            )
+            self.assertEqual(checkout_status()["booking_status"], "needs_review")
+            self.db.booking_operations.update_one(
+                {"booking_reference": link.booking_reference},
+                {"$set": {"payment_id": "different-payment"}},
+            )
+            self.assertEqual(checkout_status()["booking_status"], "pending_confirmation")
+
+    def test_prommt_test_recovery_verifies_exact_payment_and_reuses_booking_operation(self):
+        self.settings.payment_mode = "prommt_test"
+        self.settings.security_bypass_in_dev = False
+        payment = {
+            "payment_id": "pay_existing_test", "booking_reference": "RSP-TEST-RECOVERY",
+            "quote_id": "quote-existing", "prommt_request_id": "resource-existing",
+            "status": "unpaid", "evidence_source": "prommt", "is_test": True,
+            "purpose": "deposit", "amount": "50.00", "currency": "EUR",
+        }
+        self.db.package_payments.insert_one(payment.copy())
+        self.db.package_payments.insert_one({**payment, "payment_id": "pay_non_test", "is_test": False})
+        client = self.pricing_service.prommt_client = PrommtClient(PrommtSettings(PROMMT_MODE="TEST"))
+        details = PrommtPaymentDetailsResponse(
+            status="PAID_SUCCESS", amount=Decimal("50.00"), currency="EUR",
+            externalId=payment["booking_reference"], transactionId="test-transaction",
+        )
+        with patch("rosapenna_backend.api.routes.packages.get_booking_operation_engine") as engine, patch.object(
+            client, "get_test_payment_details", return_value=details.model_copy(update={"status": "CREATED"}),
+        ) as lookup:
+            def recover(payment_id):
+                return reconcile_prommt_test_payment(payment_id, MagicMock(), self.pricing_service)
+
+            self.settings.security_bypass_in_dev = True
+            with self.assertRaises(HTTPException) as disabled:
+                recover(payment["payment_id"])
+            self.assertEqual(disabled.exception.status_code, 503)
+            self.settings.security_bypass_in_dev = False
+            with self.assertRaises(HTTPException) as missing:
+                recover("pay_non_test")
+            self.assertEqual(missing.exception.status_code, 404)
+            lookup.assert_not_called()
+            with self.assertRaises(HTTPException) as unpaid:
+                recover(payment["payment_id"])
+            self.assertEqual(unpaid.exception.status_code, 409)
+            engine.assert_not_called()
+            self.assertEqual(self.db.package_payments.find_one({"payment_id": payment["payment_id"]})["status"], "unpaid")
+
+            lookup.return_value = details
+            engine.return_value.execute_operation.return_value.status = "unconfirmed_reconciliation"
+            for _ in range(2):
+                self.assertEqual(recover(payment["payment_id"])["booking_status"], "unconfirmed_reconciliation")
+            self.assertEqual(lookup.call_count, 2)
+            calls = engine.return_value.execute_operation.call_args_list
+            self.assertEqual(calls[0], calls[1])
+            self.assertEqual(calls[0].args[0].idempotency_key, "prommt_test_pay_existing_test")
+
+        saved = self.db.package_payments.find_one({"payment_id": payment["payment_id"]})
+        self.assertEqual(saved["transaction_id"], details.transaction_id)
+        self.assertNotIn("prommt_event_id", saved)
+        event = PrommtWebhookPayload(
+            eventId="event-later", resourceId=payment["prommt_request_id"], type="PAYMENT_REQUEST",
+            mode="TEST", event="PAID_SUCCESS", timestamp=0,
+        )
+        self.pricing_service.apply_prommt_test_payment(event)
+        self.assertEqual(self.db.package_payments.find_one({"payment_id": payment["payment_id"]})["prommt_event_id"], "event-later")
+
+    def test_prommt_test_rejects_ambiguous_or_changed_deposit_evidence(self):
+        self.settings.payment_mode = "prommt_test"
+        payments = self.db.package_payments
+        deposit = {
+            "payment_id": "pay_test_changed", "booking_reference": "RSP-TEST-CHANGED",
+            "quote_id": "quote-original", "prommt_request_id": "resource-test",
+            "status": "unpaid", "evidence_source": "prommt", "is_test": True,
+            "purpose": "deposit", "amount": "50.00", "currency": "EUR",
+        }
+        original_id = payments.insert_one(deposit.copy()).inserted_id
+        duplicate_id = payments.insert_one({**deposit, "payment_id": "pay_test_duplicate"}).inserted_id
+        event = PrommtWebhookPayload(
+            eventId="event-test", resourceId=deposit["prommt_request_id"], type="PAYMENT_REQUEST",
+            mode="TEST", event="PAID_SUCCESS", timestamp=0,
+        )
+        details = PrommtPaymentDetailsResponse(
+            status="PAID_SUCCESS", amount=Decimal("50.00"), currency="EUR",
+            externalId=deposit["booking_reference"], transactionId="test-transaction",
+        )
+
+        def return_details_after_quote_changes(_resource_id):
+            payments.update_one({"_id": original_id}, {"$set": {"quote_id": "quote-replaced"}})
+            return details
+
+        with patch.object(self.pricing_service.prommt_client, "get_test_payment_details") as lookup:
+            with self.assertRaisesRegex(ValueError, "deposit identity is ambiguous"):
+                self.pricing_service.apply_prommt_test_payment(event)
+            lookup.assert_not_called()
+            payments.delete_one({"_id": duplicate_id})
+            lookup.side_effect = return_details_after_quote_changes
+            with self.assertRaisesRegex(ValueError, "payment state changed"):
+                self.pricing_service.apply_prommt_test_payment(event)
+            self.assertEqual(payments.find_one({"_id": original_id})["status"], "unpaid")
+
+            payments.update_one({"_id": original_id}, {"$set": {"status": "verified_paid"}})
+            with self.assertRaisesRegex(ValueError, "missing verified provider evidence"):
+                self.pricing_service.reconcile_prommt_test_payment(deposit["payment_id"])
+            self.assertNotIn("prommt_event_id", payments.find_one({"_id": original_id}))
+            self.assertEqual(lookup.call_count, 1)
 
     def test_paid_deposit_must_match_exact_quote_before_booking(self):
         quote = make_mock_available_quote()
@@ -489,49 +698,24 @@ class TestN06CommitJourney(unittest.TestCase):
         self.assertEqual(len(self.opera_client._sandbox_reservations), 1)
         self.assertEqual(len(self.brs_client._sandbox_rounds), 2)
 
-    def test_unsupported_multi_room_topology_fails_before_writes(self):
-        """Multi-room request (>1 room) safely halts at topology_validation with zero writes."""
+    def test_unsupported_multi_room_topology_fails_before_payment(self):
+        """A room arrangement the engine cannot write must not receive a payment link."""
         quote = make_mock_available_quote()
         quote.itemized_rooms[0].room_quantity = 2
         self.pricing_service._cache_and_return_quote(quote)
 
-        link_resp = self.pricing_service.create_payment_link(
-            PackagePaymentLinkRequest(
-                quote_id=quote.quote_id,
-                lead_first_name="Alice",
-                lead_last_name="Golfer",
-                lead_email="alice@example.com",
-                lead_phone="+353871234567",
-                accepted_terms=True,
+        with self.assertRaisesRegex(ValueError, "Contact Reservations"):
+            self.pricing_service.create_payment_link(
+                PackagePaymentLinkRequest(
+                    quote_id=quote.quote_id,
+                    lead_first_name="Alice",
+                    lead_last_name="Golfer",
+                    lead_email="alice@example.com",
+                    lead_phone="+353871234567",
+                    accepted_terms=True,
+                )
             )
-        )
-        envelope, sig, raw_bytes = self.simulator.generate_simulated_event(
-            payment_id=link_resp.payment_id,
-            scenario="success",
-            secret=self.settings.simulation_signing_secret,
-            simulation_run_id=self.settings.simulation_run_id,
-        )
-        self.simulator.process_simulation_event(
-            raw_bytes=raw_bytes,
-            signature=sig,
-            secret=self.settings.simulation_signing_secret,
-            allowed_run_id=self.settings.simulation_run_id,
-        )
-
-        res = self.engine.execute_operation(
-            ExecuteBookingOperationRequest(
-                operation_type="new_booking",
-                booking_reference=link_resp.booking_reference,
-                quote_id=quote.quote_id,
-                payment_id=link_resp.payment_id,
-                idempotency_key="topo_key_001",
-            )
-        )
-        self.assertEqual(res.status, "unconfirmed_reconciliation")
-        self.assertEqual(res.stage, "unconfirmed_reconciliation")
-        self.assertTrue(res.staff_review_required)
-        self.assertIn("topology", res.message.lower())
-        # Zero hotel or golf writes occurred
+        self.assertFalse(self.pricing_service._payments_cache)
         self.assertEqual(len(self.opera_client._sandbox_reservations), 0)
         self.assertEqual(len(self.brs_client._sandbox_rounds), 0)
 

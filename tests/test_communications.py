@@ -187,6 +187,21 @@ class EmailDeliveryServiceTests(unittest.TestCase):
                     self.assertTrue(service.send_booking_confirmation(self.sample_booking).success)
                     self.assertIs("manage-booking?ref=" in send.call_args.kwargs["html_body"], expected)
 
+    def test_booking_confirmation_treats_guest_fields_as_text_in_html(self):
+        booking = {
+            **self.sample_booking,
+            "booking_reference": "REF<&>",
+            "lead_guest": {**self.sample_booking["lead_guest"], "first_name": "<b>Guest</b>"},
+        }
+        service = EmailDeliveryService(settings=SmtpSettings(allow_live_send=True))
+        with patch.object(service, "_send_smtp_email") as send:
+            self.assertTrue(service.send_booking_confirmation(booking).success)
+
+        html_body = send.call_args.kwargs["html_body"]
+        self.assertIn("&lt;b&gt;Guest&lt;/b&gt;", html_body)
+        self.assertIn("REF&lt;&amp;&gt;", html_body)
+        self.assertNotIn("<b>Guest</b>", html_body)
+
     @patch("smtplib.SMTP_SSL")
     def test_live_smtp_dispatch_ssl(self, mock_smtp_ssl_cls):
         mock_server = MagicMock()

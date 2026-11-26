@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from rosapenna_backend.api.dependencies import (
     get_booking_intent_store,
     get_brs_booking_client,
+    get_settings,
     get_teesheet_cache,
 )
 from rosapenna_backend.api.schemas.booking_intents import BrsRoundPayload
@@ -21,6 +22,7 @@ from rosapenna_backend.api.schemas.brs_booking import (
     UpdateBrsRoundRequest,
 )
 from rosapenna_backend.api.security import COMMON_DEPS
+from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.brs.booking_client import (
     BrsAuthExpiredError,
     BrsBookingClient,
@@ -29,6 +31,7 @@ from rosapenna_backend.integrations.brs.booking_client import (
     BrsReadbackMismatchError,
     BrsWriteError,
 )
+from rosapenna_backend.integrations.brs.tee_sheet import BrsUnsupportedQueryError, tee_time_is_empty
 from rosapenna_backend.services.booking_intents import (
     BookingIntentStore,
     IntentConflict,
@@ -36,7 +39,30 @@ from rosapenna_backend.services.booking_intents import (
 )
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
-router = APIRouter(prefix="/golf/rounds", tags=["golf"], dependencies=COMMON_DEPS)
+def require_local_test_rounds(settings: Settings = Depends(get_settings)) -> None:
+    # Guest checkout creates linked rounds through the verified payment operation.
+    if (settings.environment not in {"development", "test"}
+            or not settings.simulation_enabled
+            or settings.payment_mode != "simulation"
+            or not settings.simulation_run_id):
+        raise HTTPException(status_code=404, detail="Direct golf round changes are unavailable.")
+
+
+router = APIRouter(prefix="/golf/rounds", tags=["golf"], dependencies=[
+    *COMMON_DEPS, Depends(require_local_test_rounds),
+])
+
+
+def _require_empty_tee_time(cache: TeesheetCache, course_id: int, day: dt.date, time: str, players: int) -> None:
+    try:
+        sheet = cache.get(day, course_id, force_refresh=True)
+        is_empty = tee_time_is_empty(sheet, time, players)
+    except BrsUnsupportedQueryError:
+        raise HTTPException(status_code=400, detail="Unsupported date or course.") from None
+    except Exception:
+        raise HTTPException(status_code=503, detail="Could not check the tee time. No booking was changed.") from None
+    if not is_empty:
+        raise HTTPException(status_code=409, detail="The tee time is occupied or unavailable. Select a different time.")
 
 
 @router.post(
@@ -88,28 +114,7 @@ def create_golf_round(
                 idempotency_replayed=True,
             )
 
-    # 3. Validate slot against F09 tee sheet cache / availability
-    try:
-        availability = teesheet_cache.get_course_availability(
-            course_id=request.course_id,
-            date_str=request.date.isoformat(),
-            players=request.players,
-            time_from=request.time,
-            time_to=request.time,
-        )
-        matching_slots = [s for s in availability.slots if s.time == request.time and s.available_players >= request.players]
-        if not matching_slots and availability.slots_count > 0:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Tee time slot at {request.time} on {request.date} does not have enough capacity for {request.players} players.",
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        # If cache query fails with invalid course or range, report 400
-        if "Choose a date between" in str(exc) or "Unsupported course" in str(exc):
-            raise HTTPException(status_code=400, detail=str(exc))
-        # Non-fatal if cache is in sandbox mode or starting
+    _require_empty_tee_time(teesheet_cache, request.course_id, request.date, request.time, request.players)
 
     # 4. Execute round write via BRS client (or verified sandbox)
     lead_guest = intent.get("lead_guest")
@@ -222,25 +227,8 @@ def amend_golf_round(
     new_time = request.new_time or target["time"]
     new_players = request.new_players or target["players"]
 
-    if request.new_date or request.new_time or request.new_course_id:
-        try:
-            availability = teesheet_cache.get_course_availability(
-                course_id=new_course_id,
-                date_str=new_date.isoformat(),
-                players=new_players,
-                time_from=new_time,
-                time_to=new_time,
-            )
-            matching_slots = [s for s in availability.slots if s.time == new_time and s.available_players >= new_players]
-            if not matching_slots and availability.slots_count > 0:
-                raise HTTPException(
-                    status_code=409,
-                    detail=f"Tee time slot at {new_time} on {new_date} is no longer available.",
-                )
-        except HTTPException:
-            raise
-        except Exception:
-            pass
+    if (new_course_id, str(new_date), new_time) != (target["course_id"], str(target["date"]), target["time"]):
+        _require_empty_tee_time(teesheet_cache, new_course_id, new_date, new_time, new_players)
 
     # 3. Execute amendment on BRS client
     lead_guest = intent.get("lead_guest")
@@ -350,7 +338,10 @@ def release_golf_round(
         )
 
     # Execute release
-    release_res = client.release_round(round_id=round_id, booking_reference=booking_reference)
+    try:
+        release_res = client.release_round(round_id=round_id, booking_reference=booking_reference)
+    except BrsWriteError as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.message) from None
 
     # Update round status to Released in BookingIntentStore
     updated_payload = BrsRoundPayload(

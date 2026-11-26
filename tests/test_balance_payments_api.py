@@ -50,6 +50,7 @@ async def async_asgi_request(
     response_headers = {}
     response_status = 0
     response_body = bytearray()
+    path, _, query_string = path.partition("?")
 
     scope = {
         "type": "http",
@@ -59,7 +60,7 @@ async def async_asgi_request(
         "scheme": "http",
         "path": path,
         "raw_path": path.encode("ascii"),
-        "query_string": b"",
+        "query_string": query_string.encode("ascii"),
         "headers": headers_list,
         "client": ("127.0.0.1", 54321),
         "server": ("127.0.0.1", 4040),
@@ -331,6 +332,15 @@ class TestBalancePaymentsApi(unittest.TestCase):
         self.assertEqual(headers.get("cache-control"), "no-store")
         data = json.loads(body.decode("utf-8"))
         self.assertIsInstance(data, list)
+
+        status, headers, _ = asgi_request(
+            self.app,
+            "GET",
+            "/staff/balance-payments/attention?property_id=OTHER-PROPERTY",
+            headers=req_headers,
+        )
+        self.assertEqual(status, 403)
+        self.assertEqual(headers.get("cache-control"), "no-store")
 
 
 if __name__ == "__main__":

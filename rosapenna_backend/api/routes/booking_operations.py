@@ -12,7 +12,7 @@ from rosapenna_backend.api.schemas.booking_operations import (
     ExecuteBookingOperationResponse,
 )
 from rosapenna_backend.api.security import COMMON_DEPS
-from rosapenna_backend.services.booking_operations import BookingOperationEngine
+from rosapenna_backend.services.booking_operations import BookingOperationEngine, OperationConflictError
 
 router = APIRouter(
     prefix="/operations/bookings",
@@ -34,11 +34,13 @@ def commit_booking_operation(
 ):
     try:
         return engine.execute_operation(request)
+    except OperationConflictError as exc:
+        raise HTTPException(status_code=409, detail=exc.message) from None
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Operation failed with unexpected error: {exc}",
-        )
+            detail="The booking outcome could not be verified. Check the booking before retrying.",
+        ) from exc
 
 
 @router.get(

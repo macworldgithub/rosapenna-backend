@@ -5,6 +5,7 @@ import unittest
 import uuid
 from decimal import Decimal
 from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
 
 from fastapi import HTTPException
 from mongomock import MongoClient
@@ -12,6 +13,7 @@ from mongomock import MongoClient
 from rosapenna_backend.api.routes.golf_rounds import (
     amend_golf_round,
     create_golf_round,
+    require_local_test_rounds,
     release_golf_round,
 )
 from rosapenna_backend.api.schemas.booking_intents import (
@@ -96,6 +98,26 @@ class BrsBookingClientTests(unittest.TestCase):
         self.assertEqual(res.status, "Reserved")
         self.assertTrue(res.verified_via_readback)
         self.assertEqual(res.source, "verified_sandbox")
+
+    def test_direct_golf_changes_require_explicit_local_simulation(self):
+        enabled = dict(environment="test", simulation_enabled=True,
+                       payment_mode="simulation", simulation_run_id="test-run")
+        require_local_test_rounds(SimpleNamespace(**enabled))
+        for change in ({"environment": "production"}, {"simulation_run_id": None},
+                       {"simulation_enabled": False}, {"payment_mode": "prommt_test"}):
+            with self.subTest(change=change), self.assertRaises(HTTPException) as error:
+                require_local_test_rounds(SimpleNamespace(**(enabled | change)))
+            self.assertEqual(error.exception.status_code, 404)
+
+    def test_create_round_without_saved_record_fails_readback(self):
+        req = CreateBrsRoundRequest(
+            booking_intent_id="intent-1", idempotency_key="key-1",
+            course_id=1, date=dt.date(2026, 7, 15), time="09:30",
+            players=2, price="360.00",
+        )
+        with patch.object(self.client, "_save_sandbox_round"):
+            with self.assertRaises(BrsReadbackMismatchError):
+                self.client.create_round(req, booking_reference="RSP-20260715-000001")
 
     def test_create_round_st_patricks_course4(self):
         """Course 4 (St Patrick's Links) writes under tenant stpatricks in sandbox."""
@@ -190,6 +212,37 @@ class BrsBookingClientTests(unittest.TestCase):
         self.assertTrue(res.success)
         self.assertEqual(res.status, "Released")
 
+    def test_existing_round_cannot_be_changed_through_another_booking(self):
+        created = self.client.create_round(CreateBrsRoundRequest(
+            booking_intent_id="intent-owner",
+            idempotency_key="key-owner",
+            course_id=1,
+            date=dt.date(2026, 7, 15),
+            time="09:30",
+            players=2,
+            price="360.00",
+        ), booking_reference="RSP-OWNER")
+        existing = created.model_dump()
+        update = UpdateBrsRoundRequest(
+            booking_intent_id="intent-other",
+            idempotency_key="key-other",
+            round_id=created.round_id,
+            new_time="10:30",
+        )
+
+        with self.assertRaises(BrsConflictError):
+            self.client.amend_round(update, existing, booking_reference="RSP-OTHER")
+        with self.assertRaises(BrsConflictError):
+            self.client.update_round_caddy_request(
+                created.round_id, existing, CaddyRequestPayload(caddies_requested=1, caddy_category="caddie"), "RSP-OTHER",
+            )
+        with self.assertRaises(BrsConflictError):
+            self.client.release_round(created.round_id, booking_reference="RSP-OTHER")
+
+        saved = self.client._sandbox_rounds[created.round_id]
+        self.assertEqual(saved, created)
+        self.assertEqual(self.client.release_round(created.round_id, "RSP-OWNER").status, "Released")
+
 
 class BrsRouteHandlerTests(unittest.TestCase):
     """Test suite for FastAPI route endpoints in golf_rounds.py."""
@@ -201,14 +254,12 @@ class BrsRouteHandlerTests(unittest.TestCase):
 
         self.client = BrsBookingClient(BrsSettings(allow_live_writes=False))
         self.cache = MagicMock(spec=TeesheetCache)
-        # Default mock: cache reports slots available
-        dummy_slot = MagicMock()
-        dummy_slot.time = "09:30"
-        dummy_slot.available_players = 4
-        dummy_avail = MagicMock()
-        dummy_avail.slots = [dummy_slot]
-        dummy_avail.slots_count = 1
-        self.cache.get_course_availability.return_value = dummy_avail
+        self.cache.get.return_value = {
+            "data": {"tee_times": [{
+                "time": "09:30",
+                "slots": {str(i): {"status": "Available"} for i in range(4)},
+            }]}
+        }
 
     def tearDown(self):
         self.mongo.close()
@@ -273,17 +324,10 @@ class BrsRouteHandlerTests(unittest.TestCase):
         self.assertEqual(len(refreshed["links"]["brs_rounds"]), 1)
 
     def test_route_create_round_conflict_when_slot_sold_out(self):
-        """HTTP 409 raised when F09 availability reports insufficient capacity."""
+        """Reject a partially booked row even when there is room for the request."""
         intent = make_test_booking_intent(self.store)
 
-        # Configure mock cache to return 0 matching slots for 4 players
-        dummy_slot = MagicMock()
-        dummy_slot.time = "09:30"
-        dummy_slot.available_players = 2  # Only 2 left
-        dummy_avail = MagicMock()
-        dummy_avail.slots = [dummy_slot]
-        dummy_avail.slots_count = 1
-        self.cache.get_course_availability.return_value = dummy_avail
+        self.cache.get.return_value["data"]["tee_times"][0]["slots"]["0"]["status"] = "Booked"
 
         req = CreateBrsRoundRequest(
             booking_intent_id=intent["booking_intent_id"],
@@ -291,12 +335,36 @@ class BrsRouteHandlerTests(unittest.TestCase):
             course_id=1,
             date=dt.date(2026, 7, 15),
             time="09:30",
-            players=4,  # Requesting 4 players when only 2 available
-            price="720.00",
+            players=2,
+            price="360.00",
         )
         with self.assertRaises(HTTPException) as ctx:
             create_golf_round(req, self.client, self.store, self.cache)
         self.assertEqual(ctx.exception.status_code, 409)
+        self.assertIn("occupied", ctx.exception.detail)
+        self.assertFalse(self.client._sandbox_rounds)
+
+    def test_route_create_round_rejects_stale_sheet_for_another_booking(self):
+        first_intent = make_test_booking_intent(self.store)
+        second_intent = make_test_booking_intent(self.store)
+        request = CreateBrsRoundRequest(
+            booking_intent_id=first_intent["booking_intent_id"],
+            idempotency_key=str(uuid.uuid4()),
+            course_id=1,
+            date=dt.date(2026, 7, 15),
+            time="09:30",
+            players=2,
+            price="360.00",
+        )
+        first = create_golf_round(request, self.client, self.store, self.cache)
+        second = request.model_copy(update={
+            "booking_intent_id": second_intent["booking_intent_id"],
+            "idempotency_key": str(uuid.uuid4()),
+        })
+        with self.assertRaises(HTTPException) as ctx:
+            create_golf_round(second, self.client, self.store, self.cache)
+        self.assertEqual(ctx.exception.status_code, 409)
+        self.assertEqual(list(self.client._sandbox_rounds.values()), [first])
 
     def test_route_readback_mismatch_marks_recovery_required(self):
         """When client throws BrsReadbackMismatchError, booking intent transitions to recovery_required."""

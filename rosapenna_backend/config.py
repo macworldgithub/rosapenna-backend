@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     port: int = 4040
 
     default_url: str = "https://visitors.brsgolf.com/rosapenna#/course/1"
+    staff_brs_preview_storage_state: Optional[Path] = None
 
     max_concurrent_sessions: int = 3
     session_ttl_seconds: int = 30 * 60
@@ -174,8 +175,19 @@ def validate_security_settings():
         raise RuntimeError("BOOKING_ENVIRONMENT must be development, test, staging, or production")
 
     payment_mode = settings.payment_mode.strip().lower()
-    if payment_mode not in {"disabled", "simulation"}:
-        raise RuntimeError("BOOKING_PAYMENT_MODE must be 'disabled' or 'simulation'")
+    if payment_mode not in {"disabled", "simulation", "prommt_test"}:
+        raise RuntimeError("BOOKING_PAYMENT_MODE must be 'disabled', 'simulation', or 'prommt_test'")
+    if payment_mode == "prommt_test":
+        from rosapenna_backend.database import MongoSettings
+
+        mongo = MongoSettings()
+        if (
+            environment != "test"
+            or settings.host != "127.0.0.1"
+            or mongo.uri.get_secret_value() != "mongodb://127.0.0.1:27017"
+            or not (mongo.database or "").startswith("rosapenna_prommt_test_")
+        ):
+            raise RuntimeError("Prommt test checkout requires a loopback test service and a dedicated local test database")
 
     if settings.simulation_enabled != (payment_mode == "simulation"):
         raise RuntimeError("Simulation requires both payment mode and simulation enablement to agree")

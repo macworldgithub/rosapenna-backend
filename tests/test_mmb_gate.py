@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import MagicMock
 from fastapi import HTTPException
 from mongomock import MongoClient
+from pymongo.errors import PyMongoError
 
 from rosapenna_backend.api.dependencies import require_mmb_enabled
 from rosapenna_backend.api.routes.mmb_gate import (
@@ -39,15 +40,23 @@ class TestMmbGateService(unittest.TestCase):
     def tearDown(self):
         self.mongo.close()
 
-    def test_default_is_disabled_fail_closed(self):
-        """MMB must default strictly to False in unconfigured / fresh environment."""
+    def test_fresh_database_enables_manage_my_booking(self):
+        self.assertTrue(self.service.is_enabled())
+        self.assertTrue(self.service.get_staff_status()["enabled"])
+        self.assertEqual(self.db["mmb_release_gate"].count_documents({}), 0)
+
+    def test_missing_database_and_read_errors_keep_manage_my_booking_off(self):
+        self.assertFalse(MmbGateService(settings=self.settings).is_enabled())
+        self.service.collection = MagicMock()
+        self.service.collection.find_one.side_effect = PyMongoError("Unavailable")
         self.assertFalse(self.service.is_enabled())
+        self.assertFalse(self.service.get_staff_status()["enabled"])
 
     def test_public_status_contains_no_sensitive_data(self):
-        """Public status returns enabled=False and safe message without internal secrets."""
+        """Public status reports the default without internal details."""
         status = self.service.get_public_status()
-        self.assertFalse(status["enabled"])
-        self.assertIn("disabled", status["message"].lower())
+        self.assertTrue(status["enabled"])
+        self.assertIn("active", status["message"].lower())
         self.assertNotIn("written_request_reference", status)
         self.assertNotIn("updated_by", status)
 
@@ -83,7 +92,7 @@ class TestMmbGateService(unittest.TestCase):
         )
         res_off = self.service.update_gate(request=req_off, principal=principal, audit=self.audit)
         self.assertFalse(res_off["enabled"])
-        self.assertFalse(self.service.is_enabled())
+        self.assertFalse(MmbGateService(database=self.db, settings=self.settings).is_enabled())
 
         audit_events_after = list(self.db["staff_audit_events"].find({"resource": "mmb_release_gate"}))
         self.assertEqual(len(audit_events_after), 2)
@@ -109,13 +118,14 @@ class TestMmbGateRoutesAndDependencies(unittest.TestCase):
         self.mongo.close()
 
     def test_public_status_route(self):
-        """get_mmb_status returns MmbStatusResponse with enabled=False."""
+        """The production status reports enabled on a fresh database."""
         resp = get_mmb_status(gate_service=self.service)
-        self.assertFalse(resp.enabled)
-        self.assertIn("disabled", resp.message)
+        self.assertTrue(resp.enabled)
+        self.assertIn("active", resp.message)
 
     def test_guest_dependency_rejects_with_503_when_mmb_off(self):
         """require_mmb_enabled raises HTTP 503 with retry-after header when MMB is disabled."""
+        self.db["mmb_release_gate"].insert_one({"_id": "mmb_release_gate", "enabled": False})
         mock_req = MagicMock()
         mock_req.app.state.mmb_gate_service = self.service
 
@@ -166,7 +176,7 @@ class TestMmbGateRoutesAndDependencies(unittest.TestCase):
 
         # 1. Inspect initial staff status
         initial_status = get_staff_mmb_gate(principal=principal, gate_service=self.service)
-        self.assertFalse(initial_status.enabled)
+        self.assertTrue(initial_status.enabled)
 
         # 2. Update to enabled
         update_req = StaffMmbGateUpdateRequest(

@@ -194,33 +194,16 @@ class TestMmbConfirmedAmendmentCommit(unittest.TestCase):
             source="sandbox",
         )
 
-        # Mock teesheet data for proposed rounds
-        self.teesheet_cache._memory_cache[("2027-08-10", 1)] = {
-            "fetched_at": dt.datetime.now(dt.timezone.utc),
-            "data": {
-                "date": "2027-08-10",
-                "course_id": 1,
-                "tee_times": [
-                    {
-                        "time": "14:30",
-                        "slots": {"1": "AVAILABLE", "2": "AVAILABLE", "3": "AVAILABLE", "4": "AVAILABLE"},
-                    }
-                ],
-            },
-        }
-        self.teesheet_cache._memory_cache[("2027-08-11", 2)] = {
-            "fetched_at": dt.datetime.now(dt.timezone.utc),
-            "data": {
-                "date": "2027-08-11",
-                "course_id": 2,
-                "tee_times": [
-                    {
-                        "time": "14:30",
-                        "slots": {"1": "AVAILABLE", "2": "AVAILABLE", "3": "AVAILABLE", "4": "AVAILABLE"},
-                    }
-                ],
-            },
-        }
+        # Replace the fresh BRS lookup for the two proposed rounds.
+        def fixture_sheet(day, course, *, force_refresh=False):
+            self.assertTrue(force_refresh)
+            self.assertIn((str(day), course), {("2027-08-10", 1), ("2027-08-11", 3)})
+            return {"data": {"tee_times": [{
+                "time": "14:30",
+                "slots": {str(index): {"status": "Available"} for index in range(4)},
+            }]}}
+
+        self.teesheet_cache.get = MagicMock(side_effect=fixture_sheet)
 
     def _create_and_revalidate_offer(
         self,
