@@ -4,21 +4,120 @@ from html import escape
 import os
 from datetime import date, time
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from urllib.parse import parse_qs
 import unittest
 from unittest.mock import patch
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import BrowserContext, Page, sync_playwright
+from pydantic import SecretStr
 
 from rosapenna_backend.integrations.brs.booking_client import BrsConflictError, BrsReadbackMismatchError
 from rosapenna_backend.integrations.brs.staff_booking_ui import (
+    _sign_in_to_staff,
     add_to_empty_staff_row,
+    book_staff_tee_time,
     inspect_rosapenna_staff_tee_time,
     modify_staff_row,
 )
 
 
 class StaffBookingTests(unittest.TestCase):
+    def test_staff_sign_in_submits_once_in_the_server_browser(self):
+        login = "https://brsgolf.com/rosapenna/login"
+        real_route = Page.route
+        submits = []
+
+        def register(page, match, handler):
+            def serve(route):
+                def respond():
+                    self.assertEqual(route.request.url, login + ("_check" if route.request.method == "POST" else ""))
+                    if route.request.method == "POST":
+                        submits.append(parse_qs(route.request.post_data))
+                        route.fulfill(
+                            status=200, body="Signed in",
+                            headers={"Set-Cookie": "staff_fixture=1; Path=/; Secure; HttpOnly"},
+                        )
+                    else:
+                        route.fulfill(status=200, content_type="text/html", body=(
+                            '<form method="post" action="/rosapenna/login_check">'
+                            '<input name="_username" type="text"><input name="_password" type="password">'
+                            '<button type="submit">Sign in</button></form>'
+                        ))
+                handler(SimpleNamespace(request=route.request, abort=route.abort, continue_=respond))
+            real_route(page, match, serve)
+
+        with sync_playwright() as playwright:
+            with playwright.chromium.launch() as browser:
+                context = browser.new_context()
+                with patch.object(Page, "route", register):
+                    _sign_in_to_staff(context, SecretStr("fixture-user"), SecretStr("fixture-value"))
+                self.assertEqual(context.cookies(login)[0]["name"], "staff_fixture")
+        self.assertEqual(len(submits), 1)
+
+    def test_checkout_script_saves_the_exact_staff_details_once(self):
+        continue_registration = BrowserContext.route
+        saves = []
+        day_url = "https://brsgolf.com/rosapenna/day.php?course_id1=1&Day_Page=DayDetail&d_date=2027-01-12"
+        detail_url = "https://brsgolf.com/rosapenna/stt.php?id=660140"
+        save_url = detail_url.split("?", 1)[0]
+
+        def register(context, match, handler):
+            def serve(route):
+                def response():
+                    if route.request.url == day_url:
+                        name = "Test Lead" if saves else ""
+                        cells = ["18", name, "", "", "", "", "", "", "10"]
+                        row = "".join(f"<td>{cell}</td>" for cell in cells)
+                        body = (
+                            "<title>Tue 12 Jan 2027 Tee Booking System</title><form id=outputForm><table>"
+                            '<tr class="tee-time-row"><td><a href="stt.php?id=660140">10:00</a>'
+                            '<input type="checkbox" name="T_ids[]" value="660140"></td>'
+                            f"{row}</tr></table></form>"
+                        )
+                    elif route.request.url == detail_url:
+                        saved = saves[-1] if saves else {}
+                        player_fields = "".join(
+                            f'<input name="Player{i}" value="{escape(saved.get(f"Player{i}", ""))}">'
+                            f'<input type="hidden" name="Player{i}ContactId" value="">'
+                            for i in range(1, 5)
+                        )
+                        selected = "selected" if saves else ""
+                        body = (
+                            "<h1>Booking Details for Tue 12 Jan 2027, 10:00</h1>"
+                            '<p>Old Tom Morris Links</p><form method="post" action="/rosapenna/stt.php">'
+                            f'<p>Booking Ref: {169293 if saves else 0}</p>'
+                            '<input name="unique_id" value="660140"><input name="course_id" value="1">'
+                            '<input name="tee_time" value="10:00">'
+                            f'<input id="ReservationName" name="ReservationName" value="{escape(saved.get("ReservationName", ""))}">'
+                            '<select id="ReservationType" name="ReservationType"><option></option>'
+                            f'<option {selected}>Member</option></select>{player_fields}'
+                            '<input type="submit" name="NDB_Apply" value="Apply"></form>'
+                        )
+                    elif route.request.url == save_url and route.request.method == "POST":
+                        saves.append({key: value[0] for key, value in parse_qs(route.request.post_data).items()})
+                        body = "Saved"
+                    else:
+                        raise AssertionError("Unexpected BRS request")
+                    route.fulfill(status=200, content_type="text/html", body=body)
+
+                handler(SimpleNamespace(request=route.request, continue_=response, abort=route.abort))
+
+            continue_registration(context, match, serve)
+
+        with TemporaryDirectory() as directory:
+            storage_state = Path(directory) / "state.json"
+            storage_state.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
+            args = dict(course_id=1, day=date(2027, 1, 12), at=time(10), players=["Test Lead", "Test Guest"])
+            with patch.object(BrowserContext, "route", register):
+                self.assertEqual(book_staff_tee_time(storage_state, **args), "169293")
+                with self.assertRaises(BrsConflictError):
+                    book_staff_tee_time(storage_state, **args)
+        self.assertEqual(len(saves), 1)
+        self.assertEqual(saves[0]["ReservationName"], "Test Lead")
+        self.assertEqual(saves[0]["Player2"], "Test Guest")
+
     @patch.dict(os.environ, {
         "BRS_ALLOW_LIVE_WRITES": "false",
         "OPERA_ALLOW_LIVE_WRITES": "false",

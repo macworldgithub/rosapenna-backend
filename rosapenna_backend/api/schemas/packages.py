@@ -66,9 +66,11 @@ class PackageQuoteRequest(BaseModel):
     existing_booking_intent_id: Optional[str] = Field(default=None, max_length=100)
 
     @model_validator(mode="after")
-    def validate_stay_dates(self):
+    def validate_booking_details(self):
         if self.departure_date <= self.arrival_date:
             raise ValueError("departure_date must be strictly after arrival_date")
+        if sum(room.adults + room.children for room in self.rooms) > 4:
+            raise ValueError("A Stay & Play reservation can have at most four guests.")
         return self
 
 
@@ -226,7 +228,7 @@ class PackageSearchRequest(BaseModel):
 
     arrival_date: dt.date
     departure_date: dt.date
-    party_size: int = Field(default=2, ge=1, le=16)
+    party_size: int = Field(default=2, ge=1, le=4)
     room_count: int = Field(default=1, ge=1, le=10)
     bed_type: Literal["TWIN", "DOUBLE", "SINGLE"] = "TWIN"
     preferred_room_category: Optional[str] = Field(default=None, max_length=50)

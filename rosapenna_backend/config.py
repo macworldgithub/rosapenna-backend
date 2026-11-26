@@ -7,9 +7,10 @@ from urllib.parse import urlsplit
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="BOOKING_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="BOOKING_", env_file=ENV_FILE, extra="ignore")
 
     api_key: Optional[str] = None
     staff_api_key: Optional[str] = Field(
@@ -35,11 +36,6 @@ class Settings(BaseSettings):
     default_url: str = "https://visitors.brsgolf.com/rosapenna#/course/1"
     staff_brs_preview_storage_state: Optional[Path] = None
 
-    max_concurrent_sessions: int = 3
-    session_ttl_seconds: int = 30 * 60
-    session_reap_interval_seconds: int = 60
-    booking_fill_timeout_seconds: int = 90
-
     log_level: str = "INFO"
     log_file: str = "booking_api.log"
 
@@ -54,8 +50,6 @@ class Settings(BaseSettings):
     enable_vnc: bool = False
     vnc_port: int = 5900
     vnc_password: Optional[str] = None
-
-    debug_screenshots: bool = False
 
     teesheet_days: int = Field(365, ge=1, le=500)
     teesheet_refresh_hour: int = Field(5, ge=0, le=23)

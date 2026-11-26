@@ -2,6 +2,7 @@
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 from pymongo.write_concern import WriteConcern
@@ -9,7 +10,7 @@ from pymongo.write_concern import WriteConcern
 
 class MongoSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_prefix="MONGODB_", env_file=".env", extra="ignore", hide_input_in_errors=True,
+        env_prefix="MONGODB_", env_file=ENV_FILE, extra="ignore", hide_input_in_errors=True,
     )
 
     uri: SecretStr = SecretStr("")

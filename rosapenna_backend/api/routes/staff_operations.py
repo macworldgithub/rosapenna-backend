@@ -10,7 +10,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
 
 from rosapenna_backend.api.dependencies import (
-    get_session_manager,
     get_settings,
     get_staff_audit_log,
     get_teesheet_cache,
@@ -21,31 +20,10 @@ from rosapenna_backend.config import Settings
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.brs.booking_client import BrsConflictError
 from rosapenna_backend.integrations.brs.staff_booking_ui import preview_staff_tee_time
-from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.staff_audit import StaffAuditLog
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
 router = APIRouter(dependencies=[Depends(rate_limit), Depends(verify_api_key)])
-
-
-@router.get(
-    "/sessions",
-    tags=["staff operations"],
-    summary="List active and recent booking sessions",
-    description="Requires an authorized staff token; records an immutable audit log entry.",
-    responses={
-        401: {"description": "Missing or invalid staff token."},
-        503: {"description": "Staff authentication is not configured."},
-    },
-)
-def list_sessions(
-    principal: StaffPrincipal = Depends(require_staff_roles("site_admin")),
-    audit: StaffAuditLog = Depends(get_staff_audit_log),
-    manager: BookingSessionManager = Depends(get_session_manager),
-):
-    sessions = manager.list_sessions()
-    audit.record(principal, "sessions.list", "booking_sessions", "success")
-    return sessions
 
 
 @router.post(
@@ -92,7 +70,7 @@ def refresh_teesheets(
 class StaffBrsPreviewRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    course_id: Literal[1, 3]
+    course_id: Literal[1, 3, 4]
     day: date
     tee_time: str = Field(pattern=r"^(?:[01]\d|2[0-3]):[0-5]\d$")
 

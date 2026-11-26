@@ -30,6 +30,7 @@ if TYPE_CHECKING:
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 
 from rosapenna_backend.api.schemas.communications import EmailDeliveryResult
 from rosapenna_backend.core.logging import logger
@@ -41,7 +42,7 @@ class SmtpSettings(BaseSettings):
     """Configuration for SMTP email delivery."""
 
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=ENV_FILE,
         extra="ignore",
         hide_input_in_errors=True,
         populate_by_name=True,
@@ -56,6 +57,7 @@ class SmtpSettings(BaseSettings):
     from_name: str = Field("Rosapenna Hotel & Golf Resort", validation_alias="EMAIL_FROM_NAME")
     hotel_reservations_email: str = Field("reservations@rosapenna.ie", validation_alias="EMAIL_HOTEL_RESERVATIONS")
     allow_live_send: bool = Field(False, validation_alias="EMAIL_ALLOW_LIVE_SEND")
+    mmb_test_otp_recipient: str = Field("", validation_alias="EMAIL_MMB_TEST_OTP_RECIPIENT")
 
 
 class EmailDeliveryService:
@@ -667,6 +669,16 @@ Rosapenna Reservations Team · reservations@rosapenna.ie
 
         Ensures code is never exposed in logging or URL query strings.
         """
+        from rosapenna_backend.config import settings
+
+        test_recipient = self.settings.mmb_test_otp_recipient.strip().casefold()
+        allow_test_send = (
+            settings.environment == "test"
+            and settings.payment_mode == "prommt_test"
+            and settings.host == "127.0.0.1"
+            and bool(test_recipient)
+            and recipient_email.strip().casefold() == test_recipient
+        )
         subject = f"Your Verification Code — Rosapenna Manage My Booking ({booking_reference})"
         delivery_id = f"DEL-OTP-{uuid.uuid4().hex[:6]}"
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -678,8 +690,8 @@ Rosapenna Reservations Team · reservations@rosapenna.ie
                 <h3 style="color: #ffffff; margin: 0;">ROSAPENNA HOTEL & GOLF RESORT</h3>
             </div>
             <div style="padding: 20px; border: 1px solid #e2e8f0; border-top: none; text-align: center;">
-                <p>Hello {recipient_name},</p>
-                <p>Use the verification code below to access your booking <b>{booking_reference}</b>:</p>
+                <p>Hello {html.escape(recipient_name)},</p>
+                <p>Use the verification code below to access your booking <b>{html.escape(booking_reference)}</b>:</p>
                 <div style="background-color: #f1f5f9; border: 1px dashed #94a3b8; font-size: 28px; font-weight: bold; letter-spacing: 6px; padding: 15px; margin: 20px 0; color: #1A3323;">
                     {code}
                 </div>
@@ -691,9 +703,9 @@ Rosapenna Reservations Team · reservations@rosapenna.ie
         plain_body = f"Hello {recipient_name},\nYour Rosapenna verification code for booking {booking_reference} is: {code}\nValid for 10 minutes."
 
         # Redact code from routine logs
-        logger.info("Dispatching one-time-code verification email to %s (code redacted)", recipient_email)
+        logger.info("Processing one-time-code email")
 
-        if not self.settings.allow_live_send:
+        if not (self.settings.allow_live_send or allow_test_send):
             self._dispatched_emails.append({
                 "delivery_id": delivery_id,
                 "template": "one_time_code",

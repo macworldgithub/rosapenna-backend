@@ -367,7 +367,7 @@ class TestN06PaymentSimulation(unittest.TestCase):
         )
         with self.assertRaises(BrsProductionPolicyError) as ctx:
             client.create_round(req, booking_reference="RSP-TEST-POLICY")
-        self.assertIn("authorized live write API contract is not established", str(ctx.exception))
+        self.assertIn("verified website booking and its player list", str(ctx.exception))
 
     def test_prommt_live_outbound_guard_and_local_urls(self):
         """Prommt client returns local dev links and guards outbound HTTP calls in test mode."""

@@ -280,8 +280,8 @@ class TestMmbAuthRoutes(unittest.TestCase):
         self.db = self.mongo["test_mmb_routes_db"]
         self.settings = Settings(
             environment="production",
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=False,
         )
         self.email_service = EmailDeliveryService()

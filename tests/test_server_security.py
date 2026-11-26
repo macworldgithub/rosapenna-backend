@@ -8,12 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from fastapi import HTTPException, Request
 from mongomock import MongoClient
 
-from rosapenna_backend.api.routes.staff_operations import list_sessions, refresh_teesheets
+from rosapenna_backend.api.routes.staff_operations import refresh_teesheets
 from rosapenna_backend.api.security import _rate_buckets, _rate_lock, rate_limit, verify_api_key
 from rosapenna_backend.api.staff_security import StaffPrincipal, require_staff_roles
 from rosapenna_backend.config import Settings, validate_security_settings
 from rosapenna_backend.core.middleware import RequestBodySizeLimitMiddleware
-from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.staff_audit import StaffAuditLog
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
@@ -50,26 +49,16 @@ class ServerSecurityTests(unittest.TestCase):
         """Root endpoint / returns service status without authentication."""
         from rosapenna_backend.api.routes.health import health
 
-        mock_app = MagicMock()
-        mock_manager = MagicMock(spec=BookingSessionManager)
-        mock_manager.active_count.return_value = 0
-        mock_app.state.session_manager = mock_manager
-        mock_app.state.settings = Settings()
-
-        req = MagicMock(spec=Request)
-        req.app = mock_app
-
-        res = health(req)
+        res = health()
         self.assertEqual(res["status"], "ok")
         self.assertIn("service", res)
         self.assertEqual(res["service"], "Rosapenna Booking API")
-        self.assertEqual(res["active_sessions"], 0)
 
     def test_dev_bypass_allows_unauthenticated_api_calls(self):
         """When SECURITY_BYPASS_IN_DEV=true in development, requests pass without API key."""
         dev_settings = Settings(
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=True,
             environment="development",
         )
@@ -92,8 +81,8 @@ class ServerSecurityTests(unittest.TestCase):
     def test_enforced_security_blocks_missing_or_invalid_api_key(self):
         """When security is enforced, requests must supply valid X-API-Key."""
         prod_settings = Settings(
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=False,
             environment="production",
             cors_origins="https://rosapenna.ie",
@@ -111,14 +100,14 @@ class ServerSecurityTests(unittest.TestCase):
                 verify_api_key(x_api_key="wrong-key")
             self.assertEqual(ctx.exception.status_code, 401)
 
-            # Valid key (M@cWorld123!!) -> succeeds
-            verify_api_key(x_api_key="M@cWorld123!!")
+            # Valid key (Test-Key-0001) -> succeeds
+            verify_api_key(x_api_key="Test-Key-0001")
 
     def test_enforced_security_blocks_missing_or_invalid_staff_token(self):
         """When security is enforced, staff operations require valid X-Staff-Token."""
         prod_settings = Settings(
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=False,
             environment="production",
             cors_origins="https://rosapenna.ie",
@@ -138,8 +127,8 @@ class ServerSecurityTests(unittest.TestCase):
                 staff_dep(x_staff_token="wrong-token")
             self.assertEqual(ctx.exception.status_code, 401)
 
-            # Valid staff token (M@cWorld123!!) -> succeeds and assigns principal
-            principal = staff_dep(x_staff_token="M@cWorld123!!")
+            # Valid staff token (Test-Key-0001) -> succeeds and assigns principal
+            principal = staff_dep(x_staff_token="Test-Key-0001")
             self.assertEqual(principal.subject, "staff_operator")
             self.assertIn("site_admin", principal.roles)
 
@@ -151,19 +140,6 @@ class ServerSecurityTests(unittest.TestCase):
             roles=frozenset(["site_admin"]),
         )
 
-        mock_manager = MagicMock(spec=BookingSessionManager)
-        mock_manager.list_sessions.return_value = [{"session_id": "sess-123"}]
-
-        # 1. list_sessions writes audit entry
-        sessions = list_sessions(principal=principal, audit=self.audit_log, manager=mock_manager)
-        self.assertEqual(len(sessions), 1)
-
-        events = list(self.db["staff_audit_events"].find({"action": "sessions.list"}))
-        self.assertEqual(len(events), 1)
-        self.assertEqual(events[0]["actor_subject"], "staff_operator")
-        self.assertEqual(events[0]["outcome"], "success")
-
-        # 2. refresh_teesheets writes audit entry
         mock_cache = MagicMock(spec=TeesheetCache)
         mock_cache.refresh.return_value = {"updated": 10}
 
@@ -182,8 +158,8 @@ class ServerSecurityTests(unittest.TestCase):
     def test_rate_limiting_enforcement(self):
         """When security is enforced, exceeding rate_limit_per_minute returns 429."""
         strict_settings = Settings(
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=False,
             rate_limit_per_minute=5,
             environment="production",
@@ -239,13 +215,13 @@ class ServerSecurityTests(unittest.TestCase):
         self.assertEqual(sent_messages[0]["status"], 200)
 
     def test_production_security_validation(self):
-        """validate_security_settings enforces production rules and accepts M@cWorld123!!."""
+        """validate_security_settings enforces production rules and accepts Test-Key-0001."""
         # 1. Rejects dev bypass in production
         bad_bypass = Settings(
             environment="production",
             security_bypass_in_dev=True,
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             cors_origins="https://rosapenna.ie",
             docs_enabled=False,
         )
@@ -259,7 +235,7 @@ class ServerSecurityTests(unittest.TestCase):
             environment="production",
             security_bypass_in_dev=False,
             api_key="short",
-            staff_api_key="M@cWorld123!!",
+            staff_api_key="Test-Key-0001",
             cors_origins="https://rosapenna.ie",
             docs_enabled=False,
             min_key_length=12,
@@ -269,12 +245,12 @@ class ServerSecurityTests(unittest.TestCase):
                 validate_security_settings()
             self.assertIn("BOOKING_API_KEY", str(ctx.exception))
 
-        # 3. User chosen password M@cWorld123!! (13 chars) passes production validation
+        # 3. A 13-character test key (Test-Key-0001) (13 chars) passes production validation
         valid_prod = Settings(
             environment="production",
             security_bypass_in_dev=False,
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             cors_origins="https://rosapenna.ie",
             docs_enabled=False,
             min_key_length=12,

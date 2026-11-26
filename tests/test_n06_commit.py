@@ -335,7 +335,7 @@ class TestN06CommitJourney(unittest.TestCase):
         self.assertEqual(raised.exception.status_code, 503)
         service.apply_prommt_test_payment.assert_not_called()
 
-    def test_prommt_test_webhook_checks_signatures_and_saves_one_booking(self):
+    def test_prommt_test_webhook_verifies_payment_without_simulating_booking(self):
         self.settings.payment_mode = "prommt_test"
         self.settings.simulation_enabled = False
         secret = secrets.token_urlsafe(32)
@@ -413,22 +413,21 @@ class TestN06CommitJourney(unittest.TestCase):
             self.assertEqual(saved["prommt_event_id"], event["eventId"])
             self.assertEqual(self.db.booking_operations.count_documents({}), 0)
 
-            self.assertEqual(deliver(event)["booking_status"], "confirmed")
-            self.assertEqual(deliver(event)["booking_status"], "confirmed")
+            self.assertEqual(deliver(event)["booking_status"], "unconfirmed_reconciliation")
+            self.assertEqual(deliver(event)["booking_status"], "unconfirmed_reconciliation")
             self.assertEqual(lookup.call_count, 2)
-            self.assertEqual(self.db.booking_operations.count_documents({"booking_reference": link.booking_reference}), 1)
-            self.assertEqual(len(self.opera_client._sandbox_reservations), 1)
-            self.assertEqual(len(self.brs_client._sandbox_rounds), 2)
+            operation_query = {"booking_reference": link.booking_reference}
+            self.assertEqual(self.db.booking_operations.count_documents(operation_query), 1)
+            operation = self.db.booking_operations.find_one(operation_query)
+            self.assertTrue(operation["payment_verified"])
+            self.assertEqual(operation["staff_alert"]["failed_stage"], "vendor_test_booking_unavailable")
+            self.assertFalse(self.opera_client._sandbox_reservations)
+            self.assertFalse(self.brs_client._sandbox_rounds)
 
             def checkout_status():
                 return get_package_payment(link.payment_id, self.pricing_service, self.engine)
 
-            self.assertEqual(checkout_status(), {"status": "verified_paid", "booking_status": "confirmed"})
-            self.db.booking_operations.update_one(
-                {"booking_reference": link.booking_reference},
-                {"$set": {"readback_evidence.brs_verified": False}},
-            )
-            self.assertEqual(checkout_status()["booking_status"], "needs_review")
+            self.assertEqual(checkout_status(), {"status": "verified_paid", "booking_status": "needs_review"})
             self.db.booking_operations.update_one(
                 {"booking_reference": link.booking_reference},
                 {"$set": {"payment_id": "different-payment"}},

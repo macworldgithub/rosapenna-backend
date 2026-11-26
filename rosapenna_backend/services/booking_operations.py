@@ -411,12 +411,22 @@ class BookingOperationEngine:
                 created_at=record.created_at,
             )
 
-        # Test payment must never authorize real inventory operations or guest email.
+        # Only the loopback Prommt TEST profile can use verified TEST evidence for real vendor writes.
         settings = getattr(self.pricing_service, "settings", None)
         payment_mode = getattr(settings, "payment_mode", None)
         environment = getattr(settings, "environment", None)
         opera_settings = getattr(self.opera_client, "settings", None)
         brs_settings = getattr(self.brs_client, "settings", None)
+        live_vendor_test = (
+            environment == "test"
+            and payment_mode == "prommt_test"
+            and getattr(settings, "host", None) == "127.0.0.1"
+            and payment_doc.get("evidence_source") == "prommt"
+            and payment_doc.get("is_test") is True
+            and getattr(opera_settings, "allow_live_writes", None) is True
+            and getattr(brs_settings, "allow_live_writes", None) is True
+            and getattr(self.email_service.settings, "allow_live_send", None) is False
+        )
         if (payment_doc.get("evidence_source") == "simulation"
                 or payment_doc.get("is_test") is True
                 or payment_mode in {"simulation", "prommt_test"}):
@@ -441,11 +451,20 @@ class BookingOperationEngine:
                 and getattr(brs_settings, "allow_live_writes", None) is False
                 and getattr(self.email_service.settings, "allow_live_send", None) is False
             )
-            if not test_booking_safe:
+            if not (test_booking_safe or live_vendor_test):
                 return self._fail_to_reconciliation(
                     record=record,
                     failed_stage="simulation_safety",
                     reason="Test payment cannot authorize this booking configuration.",
+                    payment_doc=payment_doc,
+                )
+
+            if prommt_test_payment and not live_vendor_test:
+                record.payment_verified = True
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="vendor_test_booking_unavailable",
+                    reason="Prommt TEST payment verified. The BRS vendor test booking path is unavailable.",
                     payment_doc=payment_doc,
                 )
 
@@ -459,6 +478,26 @@ class BookingOperationEngine:
                     record=record,
                     failed_stage="live_booking_unavailable",
                     reason="BRS live booking is not enabled. No hotel or golf reservation was written.",
+                    payment_doc=payment_doc,
+                )
+
+            if not self.opera_client.is_configured:
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="live_booking_unavailable",
+                    reason="Live OPERA access is not configured. No hotel or golf reservation was written.",
+                    payment_doc=payment_doc,
+                )
+
+            if not live_vendor_test and (
+                payment_doc.get("evidence_source") != "prommt"
+                or payment_doc.get("is_test") is not False
+                or getattr(opera_settings, "allow_live_writes", False) is not True
+            ):
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="live_booking_unavailable",
+                    reason="Live Stay & Play booking requires verified live Prommt payment and live hotel access.",
                     payment_doc=payment_doc,
                 )
 
@@ -575,6 +614,25 @@ class BookingOperationEngine:
                 payment_doc=payment_doc,
             )
 
+        golf_rounds = (
+            quote.itemized_golf
+            if getattr(quote, "itemized_golf", None)
+            else getattr(quote, "rounds", [])
+        )
+        staff_options = {}
+        if getattr(brs_settings, "allow_live_writes", False) is True:
+            staff_players = [f"{first_name} {last_name}"] + [
+                f"{guest.first_name} {guest.last_name}" for guest in unassigned_guests
+            ]
+            if any(round_spec.players != len(staff_players) for round_spec in golf_rounds):
+                return self._fail_to_reconciliation(
+                    record=record,
+                    failed_stage="guest_roster_validation",
+                    reason="The saved guest list does not match every tee time.",
+                    payment_doc=payment_doc,
+                )
+            staff_options["staff_players"] = staff_players
+
         room_items = getattr(quote, "itemized_rooms", [])
         total_rooms_requested = sum(r.room_quantity for r in room_items) if room_items else 1
         if total_rooms_requested > 1:
@@ -608,11 +666,6 @@ class BookingOperationEngine:
             str(quote.total_package_price)
             if hasattr(quote, "total_package_price")
             else str(getattr(quote, "total_price", "0.00"))
-        )
-        golf_rounds = (
-            quote.itemized_golf
-            if getattr(quote, "itemized_golf", None)
-            else getattr(quote, "rounds", [])
         )
 
         if not opera_res_id:
@@ -690,6 +743,7 @@ class BookingOperationEngine:
                         request=brs_req,
                         booking_reference=record.booking_reference,
                         lead_guest=lead_guest,
+                        **staff_options,
                     )
                     if not brs_res.verified_via_readback:
                         return self._fail_to_reconciliation(
@@ -1468,11 +1522,19 @@ class BookingOperationEngine:
                 departure_date=quote.departure_date,
                 adults=guests_count,
             )
+            live_hotel_write = getattr(getattr(self.opera_client, "settings", None), "allow_live_writes", False) is True
+            if live_hotel_write and room_avail.source != "opera_cloud":
+                return False, "Live OPERA room availability could not be verified."
             categories = getattr(room_avail, "categories", None) or getattr(room_avail, "room_categories", [])
             room_matches = [
                 r for r in categories
                 if (getattr(r, "room_category", None) == room_category or getattr(r, "category_code", None) == room_category)
                 and (getattr(r, "available_rooms", None) or getattr(r, "rooms_available", 0)) >= total_rooms
+                and (
+                    not live_hotel_write
+                    or not room_items
+                    or any(rate.rate_plan_code == room_items[0].rate_plan_code for rate in r.rates)
+                )
             ]
             if not room_matches:
                 return False, f"Room category {room_category} is no longer available for requested stay dates ({total_rooms} rooms requested)."

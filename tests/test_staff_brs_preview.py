@@ -68,7 +68,7 @@ class StaffBrsPreviewTests(TestCase):
     def test_denies_unauthorized_and_invalid_requests(self, preview):
         response = self.post_preview(payload=self.payload)
         self.assertEqual(response.status_code, 401)
-        for invalid in ({"course_id": 4}, {"tee_time": "25:00"}, {"url": "https://example.invalid"}):
+        for invalid in ({"course_id": 2}, {"tee_time": "25:00"}, {"url": "https://example.invalid"}):
             with self.subTest(invalid=invalid):
                 response = self.post_preview(
                     headers=self.headers, payload=self.payload | invalid,
@@ -76,6 +76,22 @@ class StaffBrsPreviewTests(TestCase):
                 self.assertEqual(response.status_code, 422)
         preview.assert_not_called()
         self.audit.record.assert_not_called()
+
+    @patch("rosapenna_backend.integrations.brs.staff_booking_ui.sync_playwright")
+    @patch("rosapenna_backend.integrations.brs.staff_booking_ui.inspect_rosapenna_staff_tee_time", return_value=False)
+    def test_preview_uses_the_provider_site_and_course_id(self, inspect, playwright):
+        from datetime import date, time
+
+        browser = playwright.return_value.__enter__.return_value.chromium.launch.return_value.__enter__.return_value
+        page = browser.new_context.return_value.new_page.return_value
+        for course, location in (
+            (1, "rosapenna/day.php?course_id1=1"),
+            (3, "rosapenna/day.php?course_id1=3"),
+            (4, "stpatrickslinks/day.php?course_id1=1"),
+        ):
+            with self.subTest(course=course):
+                self.assertFalse(preview_staff_tee_time(self.storage, course_id=course, day=date(2027, 1, 12), at=time(10)))
+                self.assertEqual(page.goto.call_args.args[0], f"https://brsgolf.com/{location}&Day_Page=DayDetail&d_date=2027-01-12")
 
     @patch.object(staff_operations, "preview_staff_tee_time")
     def test_preview_requires_payments_off_and_session(self, preview):

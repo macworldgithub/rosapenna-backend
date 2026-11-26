@@ -7,7 +7,7 @@ import mongomock
 from rosapenna_backend.api.routes.pre_arrival_rooming import create_rooming_sandbox
 from rosapenna_backend.services.pre_arrival_rooming import SandboxRooming
 from scripts.run_n10_sandbox import create_fixture
-from test_pre_arrival_rooming import AsgiClient
+from tests.test_pre_arrival_rooming import AsgiClient
 
 
 class CaddyTests(unittest.TestCase):

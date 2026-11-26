@@ -8,7 +8,6 @@ from rosapenna_backend.integrations.opera.client import OperaClient
 from rosapenna_backend.integrations.prommt import PrommtClient
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
-from rosapenna_backend.services.booking_sessions import BookingSessionManager
 from rosapenna_backend.services.email_delivery import EmailDeliveryService
 from rosapenna_backend.services.mmb_amendments import MmbAmendmentService
 from rosapenna_backend.services.mmb_auth import (
@@ -25,10 +24,6 @@ from rosapenna_backend.services.tee_sheets import TeesheetCache
 
 def get_settings(request: Request) -> Settings:
     return request.app.state.settings
-
-
-def get_session_manager(request: Request) -> BookingSessionManager:
-    return request.app.state.session_manager
 
 
 def get_teesheet_cache(request: Request) -> TeesheetCache:

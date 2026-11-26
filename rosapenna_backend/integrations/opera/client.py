@@ -3,6 +3,7 @@
 import base64
 import datetime as dt
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -12,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.opera.schemas import (
@@ -31,7 +33,7 @@ from rosapenna_backend.integrations.opera.schemas import (
 
 class OperaSettings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=".env", extra="ignore", hide_input_in_errors=True,
+        env_file=ENV_FILE, extra="ignore", hide_input_in_errors=True,
     )
 
     hostname: str = Field("", validation_alias="HOSTNAME")
@@ -202,7 +204,7 @@ class OperaClient:
             raise OperaIntegrationError("Departure date must be after arrival date.", status_code=400, detail_code="invalid_dates")
 
         if not self.is_configured:
-            if self.settings.enable_mock_fallback:
+            if self.settings.enable_mock_fallback and not self.settings.allow_live_writes:
                 return self._generate_fixture_availability(arrival_date, departure_date, adults, children)
             raise OperaUnavailableError("Oracle Opera Cloud integration is not configured.")
 
@@ -382,12 +384,20 @@ class OperaClient:
         hotel_avail = payload.get("hotelAvailability", [])
 
         for item in hotel_avail:
+            if self.settings.allow_live_writes and (
+                not item.get("roomType") or item.get("availableRooms") is None
+            ):
+                continue
             room_cat = item.get("roomType", "CLASSIC").upper()
             cat_name = item.get("roomTypeDescription", room_cat.title())
             available_count = int(item.get("availableRooms", 5))
 
             rates_data: List[RoomRatePlan] = []
             for rate in item.get("ratePlans", []):
+                if self.settings.allow_live_writes and (
+                    not rate.get("ratePlanCode") or rate.get("totalAmount") is None
+                ):
+                    continue
                 rates_data.append(RoomRatePlan(
                     rate_plan_code=rate.get("ratePlanCode", "BB_STANDARD"),
                     rate_plan_name=rate.get("ratePlanName", "Bed & Breakfast Standard"),
@@ -404,7 +414,7 @@ class OperaClient:
             ))
 
         has_any_rates = any(len(c.rates) > 0 for c in categories)
-        if (not categories or not has_any_rates) and self.settings.enable_mock_fallback:
+        if (not categories or not has_any_rates) and self.settings.enable_mock_fallback and not self.settings.allow_live_writes:
             return self._generate_fixture_availability(arrival, departure, adults, children)
 
         return RoomAvailabilityResponse(
@@ -659,7 +669,20 @@ class OperaClient:
                         detail_code="missing_reservation_id",
                     )
         except urllib.error.HTTPError as exc:
-            logger.error("Opera reservation create failed with HTTP %d", exc.code)
+            request_id = exc.headers.get("x-request-id", "") if exc.headers else ""
+            error_code = ""
+            try:
+                problem = json.loads(exc.read(8192))
+                if isinstance(problem, dict):
+                    error_code = str(problem.get("errorCode") or problem.get("o:errorCode") or "")
+            except (OSError, ValueError):
+                pass
+            logger.error(
+                "Opera reservation create failed with HTTP %d (code=%s, request_id=%s)",
+                exc.code,
+                error_code if re.fullmatch(r"[A-Z0-9_-]{1,64}", error_code) else "unavailable",
+                request_id if re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", request_id) else "unavailable",
+            )
             if exc.code == 401:
                 self._cached_token = None
                 raise OperaAuthError() from exc
@@ -993,17 +1016,18 @@ class OperaClient:
                 }
             }
             if req.guest_phone:
-                profile_data["customer"]["telephones"] = {
+                profile_data["telephones"] = {
                     "telephoneInfo": [{"telephone": {"phoneNumber": req.guest_phone}}]
                 }
             if req.guest_email:
-                profile_data["customer"]["emails"] = {
+                profile_data["emails"] = {
                     "emailInfo": [{"email": {"emailAddress": req.guest_email}}]
                 }
             guest_profiles.append({
                 "profileInfo": {
                     "profile": profile_data
-                }
+                },
+                "primary": occ.is_primary,
             })
 
         room_stay: Dict[str, Any] = {
@@ -1012,8 +1036,8 @@ class OperaClient:
                     "rates": {
                         "rate": [
                             {
-                                "startDate": req.arrival_date.isoformat(),
-                                "endDate": req.departure_date.isoformat(),
+                                "start": req.arrival_date.isoformat(),
+                                "end": req.departure_date.isoformat(),
                             }
                         ]
                     },
@@ -1046,6 +1070,8 @@ class OperaClient:
             "reservations": {
                 "reservation": [
                     {
+                        "hotelId": self.settings.hotel_id.strip(),
+                        "reservationStatus": "Reserved",
                         "roomStay": room_stay,
                         "reservationGuests": guest_profiles,
                         "reservationPaymentMethods": [

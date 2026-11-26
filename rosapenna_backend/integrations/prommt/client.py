@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional, Union
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.integrations.prommt.schemas import (
@@ -34,7 +35,7 @@ class PrommtSettings(BaseSettings):
     """Prommt payment gateway configuration."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", extra="ignore", hide_input_in_errors=True
+        env_file=ENV_FILE, extra="ignore", hide_input_in_errors=True
     )
 
     api_key: SecretStr = Field(SecretStr(""), validation_alias="PROMMT_API_KEY")

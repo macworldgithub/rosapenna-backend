@@ -30,8 +30,8 @@ class TestMmbGateService(unittest.TestCase):
         self.db = self.mongo["mmb_test_db"]
         self.settings = Settings(
             environment="development",
-            api_key="M@cWorld123!!",
-            staff_api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
+            staff_api_key="Test-Key-0001",
             security_bypass_in_dev=False,
         )
         self.service = MmbGateService(database=self.db, settings=self.settings)
@@ -107,7 +107,7 @@ class TestMmbGateRoutesAndDependencies(unittest.TestCase):
         self.db = self.mongo["mmb_routes_db"]
         self.settings = Settings(
             environment="production",
-            api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
             staff_api_key="StaffSecretKey123!!",
             security_bypass_in_dev=False,
         )
@@ -146,7 +146,7 @@ class TestMmbGateRoutesAndDependencies(unittest.TestCase):
         from unittest.mock import patch
 
         prod_settings = Settings(
-            api_key="M@cWorld123!!",
+            api_key="Test-Key-0001",
             staff_api_key="StaffSecretKey123!!",
             security_bypass_in_dev=False,
             environment="production",

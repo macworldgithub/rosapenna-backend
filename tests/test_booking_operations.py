@@ -331,31 +331,63 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.assertEqual(self.engine.get_operation(result.operation_id).staff_alert.failed_stage, "linkage")
         self.assertEqual(self.email_service._dispatched_emails, [])
 
-    def test_verified_prommt_test_payment_creates_only_sandbox_rounds(self):
+    def test_verified_prommt_test_payment_waits_for_vendor_booking(self):
         self.pricing_service.settings = SimpleNamespace(environment="test", payment_mode="prommt_test")
         self.sample_payment.update(evidence_source="prommt", is_test=True)
         self.pricing_service._payments_cache[self.sample_payment["payment_id"]] = self.sample_payment
         reader = self.pricing_service.teesheet_cache
         with patch.object(reader, "get", wraps=reader.get) as availability:
             result = self.engine.execute_operation(ExecuteBookingOperationRequest(
-                idempotency_key="prommt_test_sandbox_booking",
+                idempotency_key="prommt_test_vendor_booking",
                 operation_type="new_booking",
                 payment_id=self.sample_payment["payment_id"],
                 quote_id=self.sample_quote.quote_id,
             ))
 
-        self.assertEqual(result.status, "confirmed")
-        self.assertTrue(availability.call_args_list)
-        self.assertTrue(all(call.kwargs.get("force_refresh") is True for call in availability.call_args_list))
+        self.assertEqual(result.status, "unconfirmed_reconciliation")
+        availability.assert_not_called()
         operation = self.engine.get_operation(result.operation_id)
-        round_ids = operation.vendor_references["brs_round_ids"]
-        self.assertEqual(len(round_ids), len(self.sample_quote.itemized_golf))
-        for round_id in round_ids:
-            saved = self.brs_client._sandbox_rounds[round_id]
-            self.assertEqual(saved.source, "verified_sandbox")
-            self.assertEqual(saved.status, "Reserved")
-            self.brs_client.release_round(round_id, operation.booking_reference)
-            self.assertEqual(self.brs_client._sandbox_rounds[round_id].status, "Released")
+        self.assertTrue(operation.payment_verified)
+        self.assertEqual(operation.staff_alert.failed_stage, "vendor_test_booking_unavailable")
+        self.assertFalse(self.brs_client._sandbox_rounds)
+        self.assertFalse(self.opera_client._sandbox_reservations)
+
+    def test_loopback_prommt_test_supplies_saved_players_to_vendor_writes(self):
+        self.pricing_service.settings = SimpleNamespace(
+            environment="test", payment_mode="prommt_test", host="127.0.0.1",
+        )
+        self.sample_payment.update(
+            evidence_source="prommt", is_test=True,
+            additional_guests=[{"first_name": "Test", "last_name": "Player"}],
+        )
+        self.brs_settings.allow_live_writes = True
+        self.opera_settings.allow_live_writes = True
+
+        with (
+            patch.object(OperaClient, "is_configured", True),
+            patch.object(self.brs_client, "require_live_booking_writes"),
+            patch.object(self.engine, "_revalidate_quote_inventory_and_pricing", return_value=(True, None)),
+            patch.object(
+                self.opera_client, "create_reservation",
+                side_effect=self.opera_client._generate_fixture_write_result,
+            ) as hotel,
+            patch.object(
+                self.brs_client, "create_round",
+                side_effect=BrsWriteError("Test stopped at the real BRS boundary."),
+            ) as golf,
+        ):
+            result = self.engine.execute_operation(ExecuteBookingOperationRequest(
+                idempotency_key="prommt_loopback_vendor_test",
+                operation_type="new_booking",
+                payment_id=self.sample_payment["payment_id"],
+                quote_id=self.sample_quote.quote_id,
+            ))
+
+        hotel.assert_called_once()
+        golf.assert_called_once()
+        self.assertEqual(golf.call_args.kwargs["staff_players"], ["Jack Nicklaus", "Test Player"])
+        self.assertEqual(result.status, "unconfirmed_reconciliation")
+        self.assertFalse(self.brs_client._sandbox_rounds)
 
     def test_prommt_test_payment_cannot_enter_live_brs_path(self):
         self.pricing_service.settings = SimpleNamespace(environment="test", payment_mode="prommt_test")

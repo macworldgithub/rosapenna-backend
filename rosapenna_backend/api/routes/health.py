@@ -12,17 +12,13 @@ router = APIRouter()
     "/",
     tags=["health"],
     summary="Root service status probe",
-    description="Returns basic service status and session load on the root backend host. No API key required.",
-    response_description="Service status and current session load.",
+    description="Returns basic service status on the root backend host. No API key required.",
+    response_description="Service status.",
 )
-def health(request: Request):
-    manager = request.app.state.session_manager
-    settings = request.app.state.settings
+def health():
     return {
         "status": "ok",
         "service": "Rosapenna Booking API",
-        "active_sessions": manager.active_count(),
-        "max_concurrent_sessions": settings.max_concurrent_sessions,
     }
 
 

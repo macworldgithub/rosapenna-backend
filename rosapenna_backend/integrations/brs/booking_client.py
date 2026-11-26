@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 import datetime as dt
+from pathlib import Path
 from threading import Lock
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
-from typing import Any, Dict, NoReturn, Optional
+from typing import Any, Dict, Optional, Sequence
 
 from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from rosapenna_backend.core.settings_env import ENV_FILE
 
 from rosapenna_backend.api.schemas.brs_booking import (
     BrsRoundReleaseResult,
@@ -30,7 +32,7 @@ class BrsSettings(BaseSettings):
     """Configuration for BRS Golf integration."""
 
     model_config = SettingsConfigDict(
-        env_file=".env", extra="ignore", hide_input_in_errors=True,
+        env_file=ENV_FILE, extra="ignore", hide_input_in_errors=True,
     )
 
     base_url: str = Field("https://visitors.brsgolf.com", validation_alias="BRS_BASE_URL")
@@ -38,6 +40,9 @@ class BrsSettings(BaseSettings):
     xsrf_token: SecretStr = Field(SecretStr(""), validation_alias="BRS_GOLF_XSRF_TOKEN")
     timeout_seconds: int = Field(15, ge=2, le=60)
     allow_live_writes: bool = Field(False, validation_alias="BRS_ALLOW_LIVE_WRITES")
+    staff_username: SecretStr = Field(SecretStr(""), validation_alias="BRS_STAFF_USERNAME")
+    staff_password: SecretStr = Field(SecretStr(""), validation_alias="BRS_STAFF_PASSWORD")
+    staff_storage_state: Path | None = Field(None, validation_alias="BRS_STAFF_STORAGE_STATE")
     production_domain: str = Field("", validation_alias="BRS_PRODUCTION_DOMAIN")
     cooldown_seconds: int = Field(300, validation_alias="BRS_CHECKOUT_COOLDOWN_SECONDS")
 
@@ -125,6 +130,8 @@ class BrsBookingClient:
         request: CreateBrsRoundRequest,
         booking_reference: str,
         lead_guest: Optional[Dict[str, Any]] = None,
+        *,
+        staff_players: Sequence[str] | None = None,
     ) -> BrsRoundWriteResult:
         """Create a new tee time round record linked to a booking intent.
 
@@ -139,14 +146,33 @@ class BrsBookingClient:
             logger.info("BRS live writes are disabled by policy (BRS_ALLOW_LIVE_WRITES=false); using verified sandbox.")
             return self._create_sandbox_round(request, booking_reference)
 
-        # 2. Live write gate: live BRS writes are blocked until authorized vendor contract is established
-        self.require_live_booking_writes()
+        if staff_players is None or len(staff_players) != request.players or request.holes != "18":
+            raise BrsProductionPolicyError("Live BRS creation requires a verified website booking and its player list.")
+        storage_state = self.require_live_booking_writes()
+        from rosapenna_backend.integrations.brs.staff_booking_ui import book_staff_tee_time
 
-    def require_live_booking_writes(self) -> NoReturn:
-        """Reject coordinated live work before OPERA can write any inventory."""
-        raise BrsProductionPolicyError(
-            "Live BRS booking writes are not permitted: authorized live write API contract is not established."
+        reference = book_staff_tee_time(
+            storage_state, course_id=request.course_id, day=request.date,
+            at=dt.time.fromisoformat(request.time), players=staff_players,
+            credentials=(self.settings.staff_username, self.settings.staff_password) if storage_state is None else None,
         )
+        return BrsRoundWriteResult(
+            round_id=f"brs-{tenant}-{reference}", brs_booking_id=reference,
+            booking_reference=booking_reference, course_id=request.course_id,
+            course_name=course["name"], date=request.date, time=request.time,
+            holes=request.holes, players=request.players, price=request.price, currency=request.currency,
+            status="Reserved", source="brs_live", created_at=dt.datetime.now(dt.timezone.utc).isoformat(),
+        )
+
+    def require_live_booking_writes(self) -> Path | None:
+        """Check staff access before a coordinated booking can write hotel inventory."""
+        state = self.settings.staff_storage_state
+        if self.settings.allow_live_writes:
+            if state is not None and state.is_absolute() and state.is_file():
+                return state
+            if self.settings.staff_username.get_secret_value() and self.settings.staff_password.get_secret_value():
+                return None
+        raise BrsProductionPolicyError("Live BRS booking requires enabled writes and configured staff access.")
 
     def amend_round(
         self,
