@@ -189,7 +189,8 @@ def book_staff_tee_time(
                 with page.expect_response(
                     lambda response: response.request.method == "POST" and response.url == save_url
                 ) as submission:
-                    form.locator('input[type="submit"][name="NDB_Apply"][value="Apply"]').click()
+                    # BRS repeats the same Apply button at the top and bottom of the form.
+                    form.locator('input[type="submit"][name="NDB_Apply"][value="Apply"]').first.click()
                 if submission.value.status >= 400:
                     raise BrsReadbackMismatchError("BRS rejected the booking save. Check the slot before retrying.")
 
