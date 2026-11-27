@@ -14,6 +14,9 @@ from mongomock import MongoClient
 from fastapi import HTTPException
 
 from rosapenna_backend.api.routes.simulation import SimulatePaymentRequestBody, simulate_payment
+
+# Checkout owner hash for a well-formed test capability token (the route receives this value).
+OWNER_HASH = hashlib.sha256(('A' * 43).encode()).hexdigest()
 from rosapenna_backend.config import Settings
 
 from rosapenna_backend.integrations.payments.simulation import (
@@ -140,10 +143,10 @@ class TestN06PaymentSimulation(unittest.TestCase):
             {"evidence_source": "simulation", "is_test": True, "simulation_run_id": "other-run"},
         ):
             with self.subTest(overrides=overrides):
-                pricing.get_payment.return_value = overrides
+                pricing.get_payment.return_value = {**overrides, "owner_hash": OWNER_HASH}
                 with self.assertRaises(HTTPException) as raised:
                     asyncio.run(simulate_payment(req.payment_id, SimulatePaymentRequestBody(scenario="success"),
-                                                 settings, self.simulator, pricing, engine))
+                                                 settings, self.simulator, pricing, engine, owner_hash=OWNER_HASH))
                 self.assertEqual(raised.exception.status_code, 404)
                 self.assertEqual(self.simulator.get_payment_request(req.payment_id).status, "unpaid")
                 engine.execute_operation.assert_not_called()
@@ -160,7 +163,7 @@ class TestN06PaymentSimulation(unittest.TestCase):
         original = self.simulator.process_simulation_event(raw, signature, self.secret, self.run_id)
         settings = Settings(environment="test", payment_mode="simulation", simulation_enabled=True,
                             simulation_run_id=self.run_id, simulation_signing_secret=self.secret)
-        payment = {"evidence_source": "simulation", "is_test": True,
+        payment = {"evidence_source": "simulation", "is_test": True, "owner_hash": OWNER_HASH,
                    "simulation_run_id": self.run_id, "transaction_id": original.transaction_id,
                    "paid_at": original.paid_at}
         pricing = MagicMock()
@@ -170,7 +173,7 @@ class TestN06PaymentSimulation(unittest.TestCase):
         engine = MagicMock()
         engine.execute_operation.return_value.model_dump.return_value = {}
         asyncio.run(simulate_payment(req.payment_id, SimulatePaymentRequestBody(scenario="failure"),
-                                     settings, self.simulator, pricing, engine))
+                                     settings, self.simulator, pricing, engine, owner_hash=OWNER_HASH))
         self.assertEqual(payment["transaction_id"], original.transaction_id)
         self.assertEqual(payment["paid_at"], original.paid_at)
         self.assertEqual(payment["status"], "verified_paid")

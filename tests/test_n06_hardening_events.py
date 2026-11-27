@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import unittest
 from decimal import Decimal
@@ -19,6 +20,9 @@ from fastapi.responses import JSONResponse
 from mongomock import MongoClient
 
 from rosapenna_backend.api.routes.simulation import SimulatePaymentRequestBody, simulate_payment
+
+# Checkout owner hash for a well-formed test capability token (the route receives this value).
+OWNER_HASH = hashlib.sha256(('A' * 43).encode()).hexdigest()
 from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.payments.simulation import PaymentSimulator
 from rosapenna_backend.integrations.prommt.schemas import PrommtWebhookPayload
@@ -179,7 +183,7 @@ class TestSimulationBookingWork(unittest.TestCase):
         )
         self.payment_id = req.payment_id
         self.db["package_payments"].insert_one({
-            "payment_id": self.payment_id, "status": "unpaid", "evidence_source": "simulation",
+            "payment_id": self.payment_id, "status": "unpaid", "evidence_source": "simulation", "owner_hash": OWNER_HASH,
             "is_test": True, "simulation_run_id": self.run_id, "purpose": "deposit",
             "expires_at": (dt.datetime.now(dt.timezone.utc) + dt.timedelta(days=1)).isoformat(),
             "booking_reference": "RSP-N06-EVENTS", "quote_id": "QTE-N06-EVENTS", "amount": "100.00",
@@ -192,7 +196,7 @@ class TestSimulationBookingWork(unittest.TestCase):
     def simulate(self, engine, scenario="success"):
         return asyncio.run(simulate_payment(
             self.payment_id, SimulatePaymentRequestBody(scenario=scenario),
-            self.settings, self.simulator, self.service, engine,
+            self.settings, self.simulator, self.service, engine, owner_hash=OWNER_HASH,
         ))
 
     def test_simulation_paid_sets_pending_and_failed_commit_answers_202(self):

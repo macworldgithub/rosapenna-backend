@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from rosapenna_backend.api.dependencies import (
     get_booking_operation_engine,
+    get_checkout_owner_hash,
     get_package_pricing_service,
     get_payment_simulator,
     get_settings,
@@ -26,7 +27,11 @@ from rosapenna_backend.integrations.payments.simulation import (
     PaymentSimulator,
 )
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
-from rosapenna_backend.services.package_pricing import PackagePricingService, booking_work_pending_fields
+from rosapenna_backend.services.package_pricing import (
+    PackagePricingService,
+    booking_work_pending_fields,
+    checkout_owner_matches,
+)
 
 router = APIRouter(prefix="/dev/payments", tags=["simulation"], dependencies=COMMON_DEPS)
 
@@ -76,21 +81,23 @@ async def simulate_payment(
     simulator: PaymentSimulator = Depends(get_payment_simulator),
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
     operation_engine: BookingOperationEngine = Depends(get_booking_operation_engine),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ) -> Dict[str, Any]:
     _check_simulation_policy(settings)
 
     req = simulator.get_payment_request(payment_id)
     if not req:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation payment was not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     payment_doc = pricing_service.get_payment(payment_id)
     if (req.simulation_run_id != settings.simulation_run_id
             or req.environment != settings.environment
             or not payment_doc
+            or not checkout_owner_matches(payment_doc.get("owner_hash"), owner_hash)
             or payment_doc.get("evidence_source") != "simulation"
             or payment_doc.get("is_test") is not True
             or payment_doc.get("simulation_run_id") != settings.simulation_run_id):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Simulation payment was not found.")
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
 
     secret = settings.simulation_signing_secret or simulator.default_secret
 
@@ -192,14 +199,15 @@ def get_simulation_payment(
     payment_id: str,
     settings: Settings = Depends(get_settings),
     simulator: PaymentSimulator = Depends(get_payment_simulator),
+    pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ) -> Dict[str, Any]:
     _check_simulation_policy(settings)
+    if not checkout_owner_matches(pricing_service.get_payment_owner_hash(payment_id), owner_hash):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     req = simulator.get_payment_request(payment_id)
     if not req:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Simulation payment '{payment_id}' was not found.",
-        )
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
     return req.model_dump(mode="json")
 
 

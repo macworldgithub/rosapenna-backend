@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import functools
 import hashlib
 import hmac
 import os
@@ -48,6 +49,13 @@ from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegr
 from rosapenna_backend.services.booking_intents import BookingIntentStore, IntentNotFound
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
+
+
+def checkout_owner_matches(stored_hash: Optional[str], caller_hash: Optional[str]) -> bool:
+    """Constant-time check that the caller owns a quote or payment. Unowned records never match."""
+    if not stored_hash or not caller_hash:
+        return False
+    return hmac.compare_digest(stored_hash, caller_hash)
 
 
 def compute_quote_hash(quote: PackageQuoteResponse) -> str:
@@ -121,6 +129,8 @@ class PackagePricingService:
         self.settings = settings
         self.rules_collection = database["package_rules"] if database is not None else None
         self.quotes_collection = database["package_quotes"] if database is not None else None
+        self.quote_owners_collection = database["package_quote_owners"] if database is not None else None
+        self._quote_owners: Dict[str, str] = {}
         self.payments_collection = database["package_payments"] if database is not None else None
         self._cached_rules: Optional[PackageRulesConfig] = None
         self._quotes_cache: Dict[str, dict] = {}
@@ -610,15 +620,24 @@ class PackagePricingService:
             created_at=now_str,
         )
 
-    def _cache_and_return_quote(self, quote: PackageQuoteResponse) -> PackageQuoteResponse:
-        """Cache a quote (available, unavailable, or ineligible) so it can be retrieved and inspected."""
+    def _cache_and_return_quote(self, quote: PackageQuoteResponse, owner_hash: Optional[str] = None) -> PackageQuoteResponse:
+        """Cache a quote (available, unavailable, or ineligible) so it can be retrieved and inspected.
+
+        The owner hash goes to its own record, not into the quote document, because booking
+        confirmation validates raw quote documents against the strict quote schema.
+        """
         self._quotes_cache[quote.quote_id] = quote.model_dump(mode="json")
         if self.quotes_collection is not None:
             self.quotes_collection.insert_one(quote.model_dump(mode="json"))
+        if owner_hash:
+            self._quote_owners[quote.quote_id] = owner_hash
+            if self.quote_owners_collection is not None:
+                self.quote_owners_collection.insert_one({"quote_id": quote.quote_id, "owner_hash": owner_hash})
         return quote
 
-    def calculate_quote(self, request: PackageQuoteRequest) -> PackageQuoteResponse:
+    def calculate_quote(self, request: PackageQuoteRequest, owner_hash: Optional[str] = None) -> PackageQuoteResponse:
         """Calculate a live, itemized package quote combining Opera room rates and BRS golf rates."""
+        cache_quote = functools.partial(self._cache_and_return_quote, owner_hash=owner_hash)
         rules = self.get_rules()
         quote_id = f"QTE-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%d%H%M%S')}-{uuid.uuid4().hex[:6]}"
         now_str = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -627,7 +646,7 @@ class PackagePricingService:
 
         # 1. Eligibility Check: Require accommodation
         if not request.rooms:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="ineligible",
@@ -643,7 +662,7 @@ class PackagePricingService:
 
         # 2. Eligibility Check: Stay length
         if nights < 2:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="ineligible",
@@ -657,7 +676,7 @@ class PackagePricingService:
                 )
             )
         if nights > 5:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="ineligible",
@@ -695,7 +714,7 @@ class PackagePricingService:
             golf_error = f"Stays of {nights} nights require at least {required_rounds} golf rounds on separate days."
 
         if golf_error:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="ineligible",
@@ -712,7 +731,7 @@ class PackagePricingService:
         # 4. Live Room Pricing & Category Buffer Check (Opera Cloud)
         total_requested_rooms = sum(r.room_quantity for r in request.rooms)
         if total_requested_rooms > rules.bookable_cap:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="unavailable",
@@ -736,7 +755,7 @@ class PackagePricingService:
                 children=total_children,
             )
         except OperaIntegrationError as exc:
-            return self._cache_and_return_quote(
+            return cache_quote(
                 PackageQuoteResponse(
                     quote_id=quote_id,
                     status="unavailable",
@@ -758,7 +777,7 @@ class PackagePricingService:
             code = req_room.room_category.upper()
             cat = categories_by_code.get(code)
             if not cat:
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="unavailable",
@@ -775,7 +794,7 @@ class PackagePricingService:
             buffer = rules.category_buffers.get(code, 0)
             net_available = max(0, cat.available_rooms - buffer)
             if net_available < req_room.room_quantity:
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="unavailable",
@@ -793,7 +812,7 @@ class PackagePricingService:
 
             # Extract published/verified rate from Opera
             if not cat.rates:
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="unavailable",
@@ -831,7 +850,7 @@ class PackagePricingService:
 
         for round_req in request.golf_rounds:
             if not (request.arrival_date <= round_req.date <= request.departure_date):
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="ineligible",
@@ -849,7 +868,7 @@ class PackagePricingService:
 
             course_cfg = COURSES.get(round_req.course_id)
             if not course_cfg:
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="ineligible",
@@ -872,7 +891,7 @@ class PackagePricingService:
                     force_refresh=True,
                 )
             except Exception as exc:
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="unavailable",
@@ -903,7 +922,7 @@ class PackagePricingService:
                 except Exception:
                     pass
 
-                return self._cache_and_return_quote(
+                return cache_quote(
                     PackageQuoteResponse(
                         quote_id=quote_id,
                         status="unavailable",
@@ -1053,7 +1072,7 @@ class PackagePricingService:
             created_at=now_str,
             errors=[],
         )
-        return self._cache_and_return_quote(quote_response)
+        return cache_quote(quote_response)
 
     def get_quote(self, quote_id: str) -> Optional[PackageQuoteResponse]:
         """Retrieve a stored package quote by its ID.
@@ -1072,6 +1091,14 @@ class PackagePricingService:
         if doc:
             return PackageQuoteResponse.model_validate(doc)
         return None
+
+    def get_quote_owner_hash(self, quote_id: str) -> Optional[str]:
+        """Return the stored checkout owner hash of a quote, or None if the quote is missing or unowned."""
+        if self.quote_owners_collection is not None:
+            doc = self.quote_owners_collection.find_one({"quote_id": quote_id}, {"_id": 0, "owner_hash": 1})
+            if doc:
+                return doc.get("owner_hash")
+        return self._quote_owners.get(quote_id)
 
     def is_quote_expired(self, quote: PackageQuoteResponse) -> bool:
         """Check if quote has passed its freshness TTL."""
@@ -1144,16 +1171,24 @@ class PackagePricingService:
         with self._payment_lock:
             return self._create_payment_link_locked(request, base_url)
 
-    def _find_deposit_attempts(self, quote_id: str) -> List[dict]:
-        """Return current deposit attempts for a quote, with expiry applied by get_payment."""
+    def get_payment_owner_hash(self, payment_id: str) -> Optional[str]:
+        """Return the stored checkout owner hash of a payment, or None if the payment is missing or unowned."""
+        doc = self._payments_cache.get(payment_id)
+        if self.payments_collection is not None:
+            doc = self.payments_collection.find_one({"payment_id": payment_id}, {"_id": 0, "owner_hash": 1}) or doc
+        return (doc or {}).get("owner_hash")
+
+    def _find_deposit_attempts(self, quote_id: str, owner_hash: Optional[str]) -> List[dict]:
+        """Return current deposit attempts for a quote owned by owner_hash, with expiry applied by get_payment."""
         payment_ids = {
             doc["payment_id"] for doc in self._payments_cache.values()
             if doc.get("quote_id") == quote_id and doc.get("purpose") == "deposit"
+            and doc.get("owner_hash") == owner_hash
         }
         if self.payments_collection is not None:
             payment_ids |= {
                 doc["payment_id"] for doc in self.payments_collection.find(
-                    {"quote_id": quote_id, "purpose": "deposit"}, {"payment_id": 1, "_id": 0},
+                    {"quote_id": quote_id, "purpose": "deposit", "owner_hash": owner_hash}, {"payment_id": 1, "_id": 0},
                 )
             }
         attempts = []
@@ -1227,7 +1262,8 @@ class PackagePricingService:
         elif self.payment_simulator is not None:
             is_simulation = True
 
-        existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id), quote, quote_hash)
+        owner_hash = self.get_quote_owner_hash(quote.quote_id)
+        existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id, owner_hash), quote, quote_hash)
         if existing_link is not None:
             return existing_link
 
@@ -1365,6 +1401,7 @@ class PackagePricingService:
         payment_doc["additional_guests"] = [
             guest.model_dump(mode="json") for guest in request.additional_guests
         ]
+        payment_doc["owner_hash"] = owner_hash
         self._payments_cache[payment_id] = payment_doc
         if self.payments_collection is not None:
             try:
@@ -1372,7 +1409,7 @@ class PackagePricingService:
             except DuplicateKeyError:
                 # Another process created the open attempt first. Return that one.
                 self._payments_cache.pop(payment_id, None)
-                existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id), quote, quote_hash)
+                existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id, owner_hash), quote, quote_hash)
                 if existing_link is None:
                     raise ValueError("A payment link for this booking changed. Please try again.")
                 return existing_link

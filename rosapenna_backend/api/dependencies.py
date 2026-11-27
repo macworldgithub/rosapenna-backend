@@ -1,6 +1,10 @@
 """FastAPI dependencies for runtime-owned services."""
 
-from fastapi import Depends, HTTPException, Request
+import hashlib
+import re
+from typing import Optional
+
+from fastapi import Depends, Header, HTTPException, Request
 
 from rosapenna_backend.config import Settings
 from rosapenna_backend.integrations.brs.booking_client import BrsBookingClient
@@ -20,6 +24,16 @@ from rosapenna_backend.services.mmb_gate import MmbGateService
 from rosapenna_backend.services.package_pricing import PackagePricingService
 from rosapenna_backend.services.staff_audit import StaffAuditLog
 from rosapenna_backend.services.tee_sheets import TeesheetCache
+
+
+_CHECKOUT_CAPABILITY_RE = re.compile(r"[A-Za-z0-9_-]{43}")
+
+
+def get_checkout_owner_hash(x_checkout_capability: Optional[str] = Header(None)) -> Optional[str]:
+    """Return sha256 hex of a well-formed checkout capability token, or None (never raises)."""
+    if not x_checkout_capability or not _CHECKOUT_CAPABILITY_RE.fullmatch(x_checkout_capability):
+        return None
+    return hashlib.sha256(x_checkout_capability.encode("ascii")).hexdigest()
 
 
 def get_settings(request: Request) -> Settings:

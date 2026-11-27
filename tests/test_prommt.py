@@ -52,6 +52,9 @@ from rosapenna_backend.integrations.prommt.schemas import (
 from rosapenna_backend.services.booking_linkage import BookingLinkageService, LinkageConflictError
 from rosapenna_backend.services.package_pricing import PackagePricingService
 
+# Checkout owner hash for a well-formed test capability token (the route receives this value).
+OWNER_HASH = hashlib.sha256(('A' * 43).encode()).hexdigest()
+
 
 class PrommtIntegrationTests(unittest.TestCase):
     def setUp(self):
@@ -286,6 +289,7 @@ class PrommtRoutedPaymentTests(unittest.TestCase):
             "currency": "EUR", "expires_at": (now + dt.timedelta(minutes=10)).isoformat(),
             "created_at": now.isoformat(), "errors": [],
         }
+        self.service._quote_owners["quote_f11"] = OWNER_HASH
         self.resource_id = "prommt-resource-f11"
         with patch.object(self.service, "_check_booking_can_complete"), patch.object(
             self.client, "create_test_checkout_link",
@@ -423,7 +427,7 @@ class PrommtRoutedPaymentTests(unittest.TestCase):
             update={"status": "SETTLED"})), patch.object(
             package_routes, "get_booking_operation_engine", return_value=self.engine,
         ), self.assertRaises(HTTPException) as raised:
-            package_routes.reconcile_prommt_test_payment(self.link.payment_id, MagicMock(), self.service)
+            package_routes.reconcile_prommt_test_payment(self.link.payment_id, MagicMock(), self.service, owner_hash=OWNER_HASH)
         self.assertEqual(raised.exception.status_code, 409)
         self.assertEqual(self.stored()["status"], "unpaid")
         self.assertNotIn("transaction_id", self.stored())
@@ -456,11 +460,11 @@ class PrommtRoutedPaymentTests(unittest.TestCase):
             for override in ({"status": "PENDING"}, {"currency": "GBP"}, {"amount": Decimal("1.00")}):
                 lookup.return_value = self.details.model_copy(update=override)
                 with self.subTest(override), self.assertRaises(HTTPException) as raised:
-                    recover(self.link.payment_id, request, self.service)
+                    recover(self.link.payment_id, request, self.service, owner_hash=OWNER_HASH)
                 self.assertEqual(raised.exception.status_code, 409)
                 self.assertEqual(self.stored()["status"], "unpaid")
             lookup.return_value = self.details
-            self.assertEqual(recover(self.link.payment_id, request, self.service)["status"], "processed")
+            self.assertEqual(recover(self.link.payment_id, request, self.service, owner_hash=OWNER_HASH)["status"], "processed")
         self.assertEqual(self.stored()["status"], "verified_paid")
 
     def test_malformed_and_unknown_webhooks_are_rejected_or_ignored_without_writes(self):

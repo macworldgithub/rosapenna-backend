@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
-from rosapenna_backend.api.dependencies import get_booking_operation_engine, get_package_pricing_service
+from rosapenna_backend.api.dependencies import (
+    get_booking_operation_engine,
+    get_checkout_owner_hash,
+    get_package_pricing_service,
+)
 from rosapenna_backend.api.schemas.booking_operations import ExecuteBookingOperationRequest
 from rosapenna_backend.api.schemas.packages import (
     PackagePaymentLinkRequest,
@@ -25,7 +31,7 @@ from rosapenna_backend.integrations.prommt.schemas import PrommtWebhookPayload
 from rosapenna_backend.integrations.prommt.client import PrommtError
 from rosapenna_backend.core.logging import logger
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
-from rosapenna_backend.services.package_pricing import PackagePricingService
+from rosapenna_backend.services.package_pricing import PackagePricingService, checkout_owner_matches
 
 router = APIRouter(prefix="/packages", tags=["packages"], dependencies=COMMON_DEPS)
 webhook_router = APIRouter(prefix="/packages", tags=["packages"], dependencies=[Depends(rate_limit)])
@@ -40,9 +46,11 @@ webhook_router = APIRouter(prefix="/packages", tags=["packages"], dependencies=[
 def calculate_package_quote(
     request: PackageQuoteRequest,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ):
-    quote = pricing_service.calculate_quote(request)
-    return quote
+    if not owner_hash:
+        raise HTTPException(status_code=400, detail="Checkout capability required")
+    return pricing_service.calculate_quote(request, owner_hash=owner_hash)
 
 
 @router.get(
@@ -54,10 +62,13 @@ def calculate_package_quote(
 def get_package_quote(
     quote_id: str,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ):
+    if not checkout_owner_matches(pricing_service.get_quote_owner_hash(quote_id), owner_hash):
+        raise HTTPException(status_code=404, detail="Not found")
     quote = pricing_service.get_quote(quote_id)
     if not quote:
-        raise HTTPException(status_code=404, detail=f"Quote '{quote_id}' was not found.")
+        raise HTTPException(status_code=404, detail="Not found")
     if pricing_service.is_quote_expired(quote):
         quote.status = "unavailable"
         if "Quote has expired." not in " ".join(quote.errors):
@@ -74,7 +85,10 @@ def get_package_quote(
 def create_package_payment_link(
     request: PackagePaymentLinkRequest,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ):
+    if not checkout_owner_matches(pricing_service.get_quote_owner_hash(request.quote_id), owner_hash):
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         return pricing_service.create_payment_link(request)
     except PrommtError as exc:
@@ -92,10 +106,13 @@ def get_package_payment(
     payment_id: str,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
     operation_engine: BookingOperationEngine = Depends(get_booking_operation_engine),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ):
+    if not checkout_owner_matches(pricing_service.get_payment_owner_hash(payment_id), owner_hash):
+        raise HTTPException(status_code=404, detail="Not found")
     payment = pricing_service.get_payment(payment_id)
     if not payment:
-        raise HTTPException(status_code=404, detail="Payment link was not found.")
+        raise HTTPException(status_code=404, detail="Not found")
 
     booking_status = "awaiting_payment"
     booking_reference = payment.get("booking_reference")
@@ -172,9 +189,12 @@ def reconcile_prommt_test_payment(
     payment_id: str,
     request: Request,
     pricing_service: PackagePricingService = Depends(get_package_pricing_service),
+    owner_hash: Optional[str] = Depends(get_checkout_owner_hash),
 ):
     if not _prommt_test_enabled(pricing_service) or pricing_service.settings.security_bypass_in_dev:
         raise HTTPException(status_code=503, detail="Authenticated Prommt TEST recovery is disabled.")
+    if not checkout_owner_matches(pricing_service.get_payment_owner_hash(payment_id), owner_hash):
+        raise HTTPException(status_code=404, detail="Not found")
     try:
         payment = pricing_service.reconcile_prommt_test_payment(payment_id)
     except PrommtError:
@@ -182,7 +202,7 @@ def reconcile_prommt_test_payment(
     except ValueError:
         raise HTTPException(status_code=409, detail="Prommt TEST has no matching verified payment for this deposit.") from None
     if payment is None:
-        raise HTTPException(status_code=404, detail="Prommt TEST deposit was not found.")
+        raise HTTPException(status_code=404, detail="Not found")
 
     return _finish_or_accept_pending(request, pricing_service, payment)
 

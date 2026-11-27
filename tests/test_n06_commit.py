@@ -48,6 +48,9 @@ from rosapenna_backend.services.mmb_occupants import MmbOccupantsService
 from rosapenna_backend.services.package_pricing import PackagePricingService, compute_quote_hash
 from rosapenna_backend.services.tee_sheets import TeesheetCache
 
+# Checkout owner hash for a well-formed test capability token (the route receives this value).
+OWNER_HASH = hashlib.sha256(('A' * 43).encode()).hexdigest()
+
 
 def make_mock_available_quote() -> PackageQuoteResponse:
     arrival = dt.date(2027, 5, 14)
@@ -347,7 +350,7 @@ class TestN06CommitJourney(unittest.TestCase):
         self.pricing_service.prommt_client = client
         quote = make_mock_available_quote()
         quote.guest_count = 2
-        self.pricing_service._cache_and_return_quote(quote)
+        self.pricing_service._cache_and_return_quote(quote, owner_hash=OWNER_HASH)
         resource_id = str(uuid4())
 
         with patch.object(client, "create_test_checkout_link", return_value=PrommtPaymentRequestResponse(
@@ -426,7 +429,7 @@ class TestN06CommitJourney(unittest.TestCase):
             self.assertFalse(self.brs_client._sandbox_rounds)
 
             def checkout_status():
-                return get_package_payment(link.payment_id, self.pricing_service, self.engine)
+                return get_package_payment(link.payment_id, self.pricing_service, self.engine, owner_hash=OWNER_HASH)
 
             self.assertEqual(checkout_status(), {"status": "verified_paid", "booking_status": "needs_review"})
             self.db.booking_operations.update_one(
@@ -442,7 +445,7 @@ class TestN06CommitJourney(unittest.TestCase):
             "payment_id": "pay_existing_test", "booking_reference": "RSP-TEST-RECOVERY",
             "quote_id": "quote-existing", "prommt_request_id": "resource-existing",
             "status": "unpaid", "evidence_source": "prommt", "is_test": True,
-            "purpose": "deposit", "amount": "50.00", "currency": "EUR",
+            "purpose": "deposit", "amount": "50.00", "currency": "EUR", "owner_hash": OWNER_HASH,
         }
         self.db.package_payments.insert_one(payment.copy())
         self.db.package_payments.insert_one({**payment, "payment_id": "pay_non_test", "is_test": False})
@@ -455,7 +458,7 @@ class TestN06CommitJourney(unittest.TestCase):
             client, "get_test_payment_details", return_value=details.model_copy(update={"status": "CREATED"}),
         ) as lookup:
             def recover(payment_id):
-                return reconcile_prommt_test_payment(payment_id, MagicMock(), self.pricing_service)
+                return reconcile_prommt_test_payment(payment_id, MagicMock(), self.pricing_service, owner_hash=OWNER_HASH)
 
             self.settings.security_bypass_in_dev = True
             with self.assertRaises(HTTPException) as disabled:
@@ -628,7 +631,7 @@ class TestN06CommitJourney(unittest.TestCase):
         """End-to-end verified deposit, hotel write, golf write, linkage, and idempotency."""
         quote = make_mock_available_quote()
         quote.guest_count = 2
-        self.pricing_service._cache_and_return_quote(quote)
+        self.pricing_service._cache_and_return_quote(quote, owner_hash=OWNER_HASH)
 
         link_resp = self.pricing_service.create_payment_link(
             PackagePaymentLinkRequest(

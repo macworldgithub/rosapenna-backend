@@ -1,6 +1,7 @@
 """Unit tests for Ticket F13: Stay & Play package rules, live pricing, and eligibility."""
 
 import datetime as dt
+import hashlib
 import unittest
 import uuid
 from decimal import Decimal
@@ -36,6 +37,9 @@ from rosapenna_backend.integrations.opera.schemas import (
 from rosapenna_backend.services.booking_intents import BookingIntentStore
 from rosapenna_backend.services.package_pricing import PackagePricingService
 from rosapenna_backend.services.tee_sheets import TeesheetCache
+
+# Checkout owner hash for a well-formed test capability token (the route receives this value).
+OWNER_HASH = hashlib.sha256(('A' * 43).encode()).hexdigest()
 
 
 def make_mock_opera_avail() -> RoomAvailabilityResponse:
@@ -544,7 +548,7 @@ class PackageRouteHandlerTests(unittest.TestCase):
                 GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=3),
             ],
         )
-        quote = self.service.calculate_quote(req)
+        quote = self.service.calculate_quote(req, owner_hash=OWNER_HASH)
         self.assertEqual(quote.guest_count, 3)
 
         lead_details = dict(
@@ -577,7 +581,7 @@ class PackageRouteHandlerTests(unittest.TestCase):
             guests[1],
         ])
         self.assertNotIn("additional_guests", link_res.model_dump())
-        self.assertEqual(get_package_payment(link_res.payment_id, self.service), {
+        self.assertEqual(get_package_payment(link_res.payment_id, self.service, owner_hash=OWNER_HASH), {
             "status": "unpaid", "booking_status": "awaiting_payment",
         })
 
@@ -670,7 +674,7 @@ class PackageRouteHandlerTests(unittest.TestCase):
                 GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
             ],
         )
-        res = calculate_package_quote(request=req, pricing_service=self.service)
+        res = calculate_package_quote(request=req, pricing_service=self.service, owner_hash=OWNER_HASH)
         self.assertEqual(res.status, "available")
         self.assertEqual(res.total_package_price, "1320.00")
 
