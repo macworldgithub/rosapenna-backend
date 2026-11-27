@@ -236,7 +236,7 @@ class BookingIntentCommitRequest(BaseModel):
 
     expected_revision: int = Field(ge=1, strict=True)
     quote_id: str = Field(min_length=1, max_length=100)
-    quote_hash: Optional[str] = Field(default=None, max_length=128)
+    quote_hash: str = Field(min_length=1, max_length=128)
     command_key: Optional[str] = Field(default=None, max_length=100)
     terms_version: Optional[str] = Field(default="terms-v1-20261014", max_length=100)
 

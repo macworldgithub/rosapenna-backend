@@ -18,6 +18,8 @@ from __future__ import annotations
 import datetime as dt
 from decimal import Decimal, InvalidOperation
 import hashlib
+import json
+import re
 from threading import Lock
 from typing import Any, Dict, List, Optional
 import uuid
@@ -89,6 +91,28 @@ def _money(value: Any) -> str:
     return f"{amount:.2f}"
 
 
+def _request_hash(payload: Dict[str, Any]) -> str:
+    """SHA-256 of a canonical JSON payload. Pass only non-personal fields."""
+    canonical = json.dumps(payload, sort_keys=True, default=str, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _request_fingerprint(quote_id: Any, quote_hash: Any, payment_id: Any, amount: Any) -> str:
+    """Fingerprint of the paid checkout. The same idempotency key must keep the same fingerprint."""
+    return _request_hash({
+        "quote_id": quote_id,
+        "quote_hash": quote_hash,
+        "payment_id": payment_id,
+        "amount": str(amount) if amount is not None else None,
+    })
+
+
+def _golf_step_key(index: int, round_spec: Any) -> str:
+    """Mongo-safe step key: no dots or dollar signs, so it can be used in a targeted $set."""
+    raw = f"golf_{index}_{round_spec.course_id}_{round_spec.date}_{round_spec.time}"
+    return re.sub(r"[^A-Za-z0-9_-]", "_", raw)
+
+
 class OperationConflictError(Exception):
     """Raised when an operation encounters concurrent mutation or conflicting revision."""
 
@@ -147,10 +171,21 @@ class BookingOperationEngine:
             [("stage", ASCENDING)],
             name="idx_operation_stage",
         )
+        try:
+            # At most one new-booking operation per booking reference (amendments are not indexed).
+            self.collection.create_index(
+                [("booking_reference", ASCENDING), ("operation_type", ASCENDING)],
+                unique=True,
+                partialFilterExpression={"operation_type": "new_booking"},
+                name="uniq_new_booking_per_reference",
+            )
+        except Exception as exc:  # Some stores (or existing duplicate data) cannot build this index.
+            logger.warning("New-booking uniqueness index not created (%s)", type(exc).__name__)
 
     def _save_record(self, record: BookingOperationRecord) -> None:
         """Persist or update operation record in database and memory."""
-        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation"})
+        # Step records are written only by _set_step, so a full-document save never erases them.
+        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation", "steps"})
         # Keep N07-owned BSON fields out of JSON encoding and preserve them in fixture mirrors.
         existing = self._in_memory_by_id.get(record.operation_id, {})
         merged = {**existing, **doc}
@@ -259,6 +294,15 @@ class BookingOperationEngine:
                                  and op.payment_id == request.payment_id
                                  and op.quote_id in {None, payment.get("quote_id")}), None)
 
+        fingerprint = None
+        if request.operation_type == "new_booking":
+            fingerprint = _request_fingerprint(
+                quote_id=request.quote_id or (payment or {}).get("quote_id"),
+                quote_hash=(payment or {}).get("quote_hash"),
+                payment_id=request.payment_id,
+                amount=(payment or {}).get("amount"),
+            )
+
         # 1. Idempotency Check
         if existing is not None:
             if (
@@ -267,6 +311,7 @@ class BookingOperationEngine:
                 or (request.operation_type == "new_booking" and (
                     existing.payment_id != request.payment_id
                     or (existing.quote_id and request.quote_id and existing.quote_id != request.quote_id)
+                    or (existing.request_fingerprint and existing.request_fingerprint != fingerprint)
                 ))
             ):
                 raise OperationConflictError("This operation belongs to a different booking, quote or payment.")
@@ -316,6 +361,7 @@ class BookingOperationEngine:
                 quote_id=request.quote_id,
                 payment_id=request.payment_id,
                 amendment_offer_id=request.amendment_offer_id,
+                request_fingerprint=fingerprint,
                 stage="initialized",
                 stage_history=[
                     StageHistoryEntry(stage="initialized", details="Operation initialized")
@@ -323,6 +369,9 @@ class BookingOperationEngine:
             )
             if record.operation_type == "new_booking":
                 if not self._insert_new_booking(record):
+                    # A different key already owns this booking reference: refuse instead of looping.
+                    if self._find_record_by_key_hash(key_hash) is None:
+                        raise OperationConflictError("This booking already has a new-booking operation with different details.")
                     # Reload the winning record and apply the same scope checks.
                     return self.execute_operation(request)
             else:
@@ -375,7 +424,12 @@ class BookingOperationEngine:
                 replayed=True,
                 created_at=latest.created_at,
             )
-        result = self._execute_new_booking(record, request)
+        try:
+            result = self._execute_new_booking(record, request)
+        except Exception as exc:
+            # The claim stays set, so the operation is never replayed. Alert staff, then re-raise.
+            self._alert_after_unexpected_error(record, exc)
+            raise
         if result.status == "pending_payment":
             if self.collection is not None:
                 self.collection.update_one(scope, {"$unset": {"new_booking_started": ""}})
@@ -383,6 +437,53 @@ class BookingOperationEngine:
                 with self._new_booking_lock:
                     self._local_started.discard(record.operation_id)
         return result
+
+    def _alert_after_unexpected_error(self, record: BookingOperationRecord, exc: Exception) -> None:
+        """Save a staff alert for an unexpected error after the claim. Keeps the stage; never raises."""
+        try:
+            record.staff_alert = StaffReconciliationAlert(
+                operation_id=record.operation_id,
+                booking_reference=record.booking_reference,
+                failed_stage="unexpected_error",
+                reason=f"Unexpected {type(exc).__name__} after the booking claim. Check the step records before any action.",
+                payment_id=record.payment_id,
+                opera_reservation_id=record.vendor_references.get("opera_reservation_id"),
+                brs_round_ids=record.vendor_references.get("brs_round_ids", []),
+            )
+            record.updated_at = _utc_now_str()
+            record.stage_history.append(
+                StageHistoryEntry(stage=record.stage, details=f"Staff alert {record.staff_alert.alert_id}: unexpected error.")
+            )
+            self._save_record(record)
+        except Exception as save_exc:
+            logger.critical("Could not save staff alert for %s (%s)", record.operation_id, type(save_exc).__name__)
+        logger.critical("BOOKING RECONCILIATION REQUIRED for %s: unexpected %s", record.operation_id, type(exc).__name__)
+
+    def _set_step(
+        self,
+        record: BookingOperationRecord,
+        key: str,
+        state: str,
+        request_hash: str,
+        vendor_reference: Optional[str] = None,
+    ) -> None:
+        """Save one step entry with a targeted $set so other record fields are not rewritten."""
+        entry = {
+            "state": state,
+            "request_hash": request_hash,
+            "vendor_reference": vendor_reference,
+            "updated_at": _utc_now_str(),
+        }
+        record.steps[key] = entry
+        if self.collection is not None:
+            self.collection.update_one(
+                {"idempotency_key_hash": record.idempotency_key_hash},
+                {"$set": {f"steps.{key}": entry}},
+            )
+        with self._new_booking_lock:
+            mirror = self._in_memory_by_id.get(record.operation_id)
+            if mirror is not None:
+                mirror.setdefault("steps", {})[key] = entry
 
     def _execute_new_booking(
         self,
@@ -704,10 +805,22 @@ class BookingOperationEngine:
                     guest_email=email,
                     idempotency_key=f"opera_{record.operation_id}",
                 )
+                # Hash only non-personal request fields; guest details never enter a step record.
+                hotel_hash = _request_hash({
+                    "booking_intent_id": opera_req.booking_intent_id,
+                    "arrival_date": str(opera_req.arrival_date),
+                    "departure_date": str(opera_req.departure_date),
+                    "room_category": opera_req.room_category,
+                    "room_quantity": opera_req.room_quantity,
+                    "rate_plan_code": opera_req.rate_plan_code,
+                    "idempotency_key": opera_req.idempotency_key,
+                })
+                self._set_step(record, "hotel", "write_started", hotel_hash)
                 opera_res = self.opera_client.create_reservation(
                     request=opera_req,
                 )
                 if not opera_res.verified_via_readback:
+                    self._set_step(record, "hotel", "unknown", hotel_hash, opera_res.reservation_id)
                     return self._fail_to_reconciliation(
                         record=record,
                         failed_stage="hotel_write",
@@ -716,6 +829,7 @@ class BookingOperationEngine:
                     )
                 opera_res_id = opera_res.reservation_id
                 opera_conf_num = opera_res.confirmation_number
+                self._set_step(record, "hotel", "saved", hotel_hash, opera_res_id)
                 record.vendor_references["opera_reservation_id"] = opera_res_id
                 record.vendor_references["opera_confirmation_number"] = opera_conf_num
                 record.stage = "hotel_written"
@@ -727,6 +841,8 @@ class BookingOperationEngine:
                 )
                 self._save_record(record)
             except Exception as exc:
+                if record.steps.get("hotel", {}).get("state") == "write_started":
+                    self._set_step(record, "hotel", "unknown", record.steps["hotel"]["request_hash"])
                 logger.error("Opera reservation write failed: %s", exc)
                 return self._fail_to_reconciliation(
                     record=record,
@@ -747,6 +863,7 @@ class BookingOperationEngine:
                 if i < len(existing_round_ids):
                     continue
 
+                step_key = _golf_step_key(i, round_spec)
                 try:
                     round_price = getattr(round_spec, "price", None) or getattr(round_spec, "rate_per_player", "150.00")
                     round_price_str = f"{Decimal(str(round_price)):.2f}"
@@ -761,6 +878,8 @@ class BookingOperationEngine:
                         price=round_price_str,
                         currency="EUR",
                     )
+                    round_hash = _request_hash(brs_req.model_dump(mode="json"))
+                    self._set_step(record, step_key, "write_started", round_hash)
                     brs_res = self.brs_client.create_round(
                         request=brs_req,
                         booking_reference=record.booking_reference,
@@ -768,6 +887,7 @@ class BookingOperationEngine:
                         **staff_options,
                     )
                     if not brs_res.verified_via_readback:
+                        self._set_step(record, step_key, "unknown", round_hash, brs_res.round_id)
                         return self._fail_to_reconciliation(
                             record=record,
                             failed_stage="golf_write",
@@ -776,12 +896,15 @@ class BookingOperationEngine:
                             opera_res_id=opera_res_id,
                             brs_round_ids=existing_round_ids,
                         )
+                    self._set_step(record, step_key, "saved", round_hash, brs_res.round_id)
                     existing_round_ids.append(brs_res.round_id)
                     existing_brs_bk_ids.append(brs_res.brs_booking_id)
                     record.vendor_references["brs_round_ids"] = existing_round_ids
                     record.vendor_references["brs_booking_ids"] = existing_brs_bk_ids
                     self._save_record(record)
                 except Exception as exc:
+                    if record.steps.get(step_key, {}).get("state") == "write_started":
+                        self._set_step(record, step_key, "unknown", record.steps[step_key]["request_hash"])
                     logger.error("BRS round write failed for round %s: %s", i, exc)
                     # Attempt supported compensation or alert staff with exact state
                     return self._fail_to_reconciliation(
@@ -1107,7 +1230,7 @@ class BookingOperationEngine:
 
     def _commit_completed_with_event(self, record: BookingOperationRecord, event: Dict[str, Any]) -> bool:
         """Save the final stage and the event in one conditional write. A second event is never written."""
-        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation"})
+        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation", "steps"})
         doc["confirmed_event"] = event
         if self.collection is not None:
             result = self.collection.update_one(
@@ -1816,6 +1939,28 @@ class BookingOperationEngine:
                 "readback_verified": True,
                 "email_delivery_id": record.email_delivery_id,
                 "replayed": True,
+            }
+
+        if record.operation_type == "new_booking":
+            # Read-only report. No vendor call and no save. Staff verify each step by hand.
+            steps = [
+                {
+                    "key": key,
+                    "state": entry.get("state"),
+                    "vendor_reference": entry.get("vendor_reference"),
+                    "updated_at": entry.get("updated_at"),
+                }
+                for key, entry in sorted(record.steps.items())
+            ]
+            return {
+                "outcome": "requires_manual_reconciliation",
+                "stage": record.stage,
+                "message": "New-booking recovery is read-only. Saved steps are skipped. Verify each other step in Opera and BRS before any manual action.",
+                "readback_verified": False,
+                "steps": steps,
+                "skipped_saved_steps": [s["key"] for s in steps if s["state"] == "saved"],
+                "manual_verification_steps": [s["key"] for s in steps if s["state"] != "saved"],
+                "vendor_writes": 0,
             }
 
         if record.stage != "unconfirmed_reconciliation":

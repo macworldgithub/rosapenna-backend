@@ -6,11 +6,13 @@ import datetime as dt
 import hashlib
 import hmac
 import os
+import threading
 import uuid
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
 
 from pymongo.database import Database
+from pymongo.errors import DuplicateKeyError
 
 from rosapenna_backend.api.schemas.packages import (
     AmendmentPaymentSummary,
@@ -83,6 +85,18 @@ def compute_quote_hash(quote: PackageQuoteResponse) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+FINAL_BOOKING_STATUSES = frozenset({"confirmed", "unconfirmed_reconciliation"})
+
+
+def booking_work_pending_fields(idempotency_key: str) -> Dict[str, str]:
+    """Fields that record booking work as owed. Set in the same update that verifies a deposit."""
+    return {
+        "booking_work": "pending",
+        "booking_work_updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "booking_idempotency_key": idempotency_key,
+    }
+
+
 class PackagePricingService:
     """Calculates live, server-verified package quotes and manages rules configuration."""
 
@@ -111,6 +125,22 @@ class PackagePricingService:
         self._cached_rules: Optional[PackageRulesConfig] = None
         self._quotes_cache: Dict[str, dict] = {}
         self._payments_cache: Dict[str, dict] = {}
+        self._payment_lock = threading.Lock()
+        # mongomock ignores partialFilterExpression and would apply a full unique index to every attempt,
+        # so the database index is created only for a real MongoDB client. The process lock covers tests.
+        is_real_mongo = (self.payments_collection is not None
+                         and not type(self.payments_collection.database.client).__module__.startswith("mongomock"))
+        if is_real_mongo:
+            try:
+                # At most one open (unpaid/pending) deposit attempt per quote, enforced by the database.
+                self.payments_collection.create_index(
+                    [("quote_id", 1), ("purpose", 1)],
+                    unique=True,
+                    partialFilterExpression={"status": {"$in": ["unpaid", "pending"]}},
+                    name="uniq_open_deposit_per_quote",
+                )
+            except Exception as exc:
+                logger.warning("Could not create open deposit index: %s", exc)
 
     def get_rules(self) -> PackageRulesConfig:
         """Retrieve active package rules configuration."""
@@ -251,6 +281,7 @@ class PackagePricingService:
             "transaction_id": details.transaction_id,
             "provider_reference": resource_id,
             "paid_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+            **booking_work_pending_fields(f"prommt_test_{payment['payment_id']}"),
         }
         if event_id:
             fields["prommt_event_id"] = event_id
@@ -277,6 +308,57 @@ class PackagePricingService:
             {**scope, "status": "verified_paid", "prommt_event_id": {"$exists": False}},
             {"$set": {"prommt_event_id": event_id}},
         )
+
+    def complete_booking_work(self, payment_id: str, operation_status: str) -> None:
+        """Mark owed booking work done, only after a final booking status (confirmed or staff review)."""
+        if operation_status not in FINAL_BOOKING_STATUSES:
+            return
+        cached = self._payments_cache.get(payment_id)
+        if cached is not None and cached.get("booking_work") == "pending":
+            cached["booking_work"] = "done"
+        if self.payments_collection is not None:
+            self.payments_collection.update_one(
+                {"payment_id": payment_id, "status": "verified_paid", "booking_work": "pending"},
+                {"$set": {
+                    "booking_work": "done",
+                    "booking_work_updated_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                }},
+            )
+
+    def find_pending_booking_work(self, limit: int = 20) -> List[str]:
+        """Return ids of verified_paid payments whose booking work is still owed, oldest first."""
+        if self.payments_collection is None:
+            return []
+        size = min(max(int(limit), 1), 100)
+        docs = (
+            self.payments_collection.find(
+                {"status": "verified_paid", "booking_work": "pending"},
+                {"_id": 0, "payment_id": 1},
+            )
+            .sort("booking_work_updated_at", 1)
+            .limit(size)
+        )
+        return [doc["payment_id"] for doc in docs]
+
+    def process_pending_booking_work(self, commit_callable, limit: int = 20) -> List[str]:
+        """Run owed booking work once per payment. commit_callable(payment) returns the booking status."""
+        completed: List[str] = []
+        for payment_id in self.find_pending_booking_work(limit):
+            payment = self.payments_collection.find_one(
+                {"payment_id": payment_id, "status": "verified_paid", "booking_work": "pending"},
+                {"_id": 0},
+            )
+            if payment is None:
+                continue
+            try:
+                status = commit_callable(payment)
+            except Exception as exc:
+                logger.warning("Booking work for payment %s stays pending: %s", payment_id, type(exc).__name__)
+                continue
+            if status in FINAL_BOOKING_STATUSES:
+                self.complete_booking_work(payment_id, status)
+                completed.append(payment_id)
+        return completed
 
     def search_stay_and_golf(self, request: PackageSearchRequest) -> PackageSearchResponse:
         """Execute a live search across Opera room categories and BRS three-course tee sheets."""
@@ -1059,6 +1141,46 @@ class PackagePricingService:
         base_url: str = os.getenv("FRONTEND_BASE_URL", "http://localhost:3030"),
     ) -> PackagePaymentLinkResponse:
         """Create a scoped 25% deposit payment link for an accepted, unexpired quote (Ticket N05)."""
+        with self._payment_lock:
+            return self._create_payment_link_locked(request, base_url)
+
+    def _find_deposit_attempts(self, quote_id: str) -> List[dict]:
+        """Return current deposit attempts for a quote, with expiry applied by get_payment."""
+        payment_ids = {
+            doc["payment_id"] for doc in self._payments_cache.values()
+            if doc.get("quote_id") == quote_id and doc.get("purpose") == "deposit"
+        }
+        if self.payments_collection is not None:
+            payment_ids |= {
+                doc["payment_id"] for doc in self.payments_collection.find(
+                    {"quote_id": quote_id, "purpose": "deposit"}, {"payment_id": 1, "_id": 0},
+                )
+            }
+        attempts = []
+        for payment_id in payment_ids:
+            doc = self.get_payment(payment_id)
+            if doc:
+                attempts.append(doc)
+        return attempts
+
+    def _open_link_for(self, attempts: List[dict], quote: PackageQuoteResponse, quote_hash: str) -> Optional[PackagePaymentLinkResponse]:
+        """Return the open link for this quote, or None. Raise if a paid or conflicting link exists."""
+        if any(doc["status"] == "verified_paid" for doc in attempts):
+            raise ValueError("This booking already has a verified deposit. No new payment was created.")
+        for doc in attempts:
+            if doc["status"] not in {"unpaid", "pending"}:
+                continue
+            if (doc.get("quote_hash") == quote_hash and doc.get("currency") == quote.currency
+                    and Decimal(str(doc["amount"])) == Decimal(str(quote.deposit_amount))):
+                return PackagePaymentLinkResponse.model_validate(doc)
+            raise ValueError("This booking already has an open payment link for a different amount. Refresh your quote and try again.")
+        return None
+
+    def _create_payment_link_locked(
+        self,
+        request: PackagePaymentLinkRequest,
+        base_url: str,
+    ) -> PackagePaymentLinkResponse:
         quote = self.get_quote(request.quote_id)
         now = dt.datetime.now(dt.timezone.utc)
         now_str = now.isoformat()
@@ -1105,12 +1227,16 @@ class PackagePricingService:
         elif self.payment_simulator is not None:
             is_simulation = True
 
+        existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id), quote, quote_hash)
+        if existing_link is not None:
+            return existing_link
+
         # 7-day payment link expiry and 5-day reminder per approved N05 scope
         expires_at = now + dt.timedelta(days=7)
         reminder_at = now + dt.timedelta(days=5)
 
         if is_simulation and self.payment_simulator is not None:
-            intent_id = getattr(request, "booking_intent_id", None) or f"bki_{uuid.uuid4().hex}"
+            intent_id = f"bki_{uuid.uuid4().hex}"
             booking_ref = f"RSP-{now.strftime('%Y%m%d')}-{uuid.uuid4().hex[:6].upper()}"
             sim_run_id = getattr(self.settings, "simulation_run_id", None) if self.settings else None
             env_name = getattr(self.settings, "environment", "development") if self.settings else "development"
@@ -1241,7 +1367,15 @@ class PackagePricingService:
         ]
         self._payments_cache[payment_id] = payment_doc
         if self.payments_collection is not None:
-            self.payments_collection.insert_one(dict(payment_doc))
+            try:
+                self.payments_collection.insert_one(dict(payment_doc))
+            except DuplicateKeyError:
+                # Another process created the open attempt first. Return that one.
+                self._payments_cache.pop(payment_id, None)
+                existing_link = self._open_link_for(self._find_deposit_attempts(quote.quote_id), quote, quote_hash)
+                if existing_link is None:
+                    raise ValueError("A payment link for this booking changed. Please try again.")
+                return existing_link
 
         logger.info(
             "Created scoped payment link %s for booking %s (amount: €%s, expires: %s)",

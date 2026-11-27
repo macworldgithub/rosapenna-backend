@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Literal, Optional
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 
 from rosapenna_backend.api.dependencies import (
@@ -25,7 +26,7 @@ from rosapenna_backend.integrations.payments.simulation import (
     PaymentSimulator,
 )
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
-from rosapenna_backend.services.package_pricing import PackagePricingService
+from rosapenna_backend.services.package_pricing import PackagePricingService, booking_work_pending_fields
 
 router = APIRouter(prefix="/dev/payments", tags=["simulation"], dependencies=COMMON_DEPS)
 
@@ -123,8 +124,11 @@ async def simulate_payment(
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
+    cmd_key = body.command_id or f"sim_commit_{payment_id}"
+
     # Sync into pricing service payment doc
     if payment_doc:
+        newly_verified = processed_req.status == "verified_paid" and payment_doc.get("status") != "verified_paid"
         payment_doc["status"] = processed_req.status
         payment_doc["evidence_source"] = "simulation"
         payment_doc["is_test"] = True
@@ -132,6 +136,8 @@ async def simulate_payment(
         if processed_req.status == "verified_paid":
             payment_doc["transaction_id"] = processed_req.transaction_id
             payment_doc["paid_at"] = processed_req.paid_at
+            if newly_verified:
+                payment_doc.update(booking_work_pending_fields(cmd_key))
         else:
             payment_doc["failure_reason"] = envelope.failure_reason
 
@@ -147,7 +153,6 @@ async def simulate_payment(
     if processed_req.status == "verified_paid":
         booking_ref = processed_req.booking_reference
         quote_id = processed_req.quote_id
-        cmd_key = body.command_id or f"sim_commit_{payment_id}"
         try:
             op_req = ExecuteBookingOperationRequest(
                 operation_type="new_booking",
@@ -158,12 +163,14 @@ async def simulate_payment(
             )
             op_resp = operation_engine.execute_operation(op_req)
             commit_result = op_resp.model_dump(mode="json")
+            pricing_service.complete_booking_work(payment_id, op_resp.status)
         except Exception as exc:
-            logger.error("Simulation auto-commit failed for %s: %s", booking_ref, exc)
-            commit_result = {
-                "status": "commit_failed",
-                "error": str(exc),
-            }
+            logger.error("Simulation auto-commit failed for %s: %s", booking_ref, type(exc).__name__)
+            return JSONResponse(status_code=status.HTTP_202_ACCEPTED, content={
+                "status": "accepted_pending_booking",
+                "payment_id": payment_id,
+                "payment_status": processed_req.status,
+            })
 
     return {
         "status": "success",

@@ -314,6 +314,44 @@ class BookingIntentStore:
             return "recovery_required", "staff_recovery"
         raise IntentConflict("This booking intent cannot accept that action in its current stage")
 
+    def record_reaccept(self, intent_id: str, expected_revision: int, snapshot: dict, terms_version: Optional[str]) -> bool:
+        """Store the accepted quote, one consent record and one history entry, only if the revision still matches."""
+        current = self.collection.find_one({"_id": intent_id}, {"stage": 1})
+        if current is None:
+            raise IntentNotFound("Booking intent was not found")
+        now = _utc_now()
+        new_revision = expected_revision + 1
+        consent = {
+            "accepted_at": now,
+            "expected_revision": expected_revision,
+            "quote_id": snapshot["quote_id"],
+            "quote_hash": snapshot["quote_hash"],
+            "terms_version": terms_version,
+        }
+        event = {
+            "action_id": str(uuid.uuid4()),
+            "action": "offer_reaccepted",
+            "source": "website_checkout",
+            "occurred_at": now,
+            "stage": current["stage"],
+            "revision": new_revision,
+            "evidence": {"quote_id": snapshot["quote_id"], "quote_hash": snapshot["quote_hash"], "terms_version": terms_version},
+        }
+        result = self.collection.update_one(
+            {"_id": intent_id, "revision": expected_revision},
+            {
+                "$set": {
+                    "revision": new_revision,
+                    "quote.version": new_revision,
+                    "quote.live_revalidated": snapshot,
+                    "updated_at": now,
+                    "last_action_at": now,
+                },
+                "$push": {"consents": consent, "actions": event},
+            },
+        )
+        return result.modified_count == 1
+
     def get_by_reference(self, reference_or_id: str) -> dict:
         clean = reference_or_id.strip()
         query = {

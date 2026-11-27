@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from rosapenna_backend.api.dependencies import get_booking_operation_engine, get_package_pricing_service
@@ -22,6 +23,7 @@ from rosapenna_backend.api.schemas.packages import (
 from rosapenna_backend.api.security import COMMON_DEPS, rate_limit
 from rosapenna_backend.integrations.prommt.schemas import PrommtWebhookPayload
 from rosapenna_backend.integrations.prommt.client import PrommtError
+from rosapenna_backend.core.logging import logger
 from rosapenna_backend.services.booking_operations import BookingOperationEngine
 from rosapenna_backend.services.package_pricing import PackagePricingService
 
@@ -159,7 +161,7 @@ async def handle_prommt_webhook(
     if payment is None:
         return {"status": "ignored"}
 
-    return await run_in_threadpool(_finish_prommt_test_payment, request, payment)
+    return await run_in_threadpool(_finish_or_accept_pending, request, pricing_service, payment)
 
 
 @router.post(
@@ -182,7 +184,7 @@ def reconcile_prommt_test_payment(
     if payment is None:
         raise HTTPException(status_code=404, detail="Prommt TEST deposit was not found.")
 
-    return _finish_prommt_test_payment(request, payment)
+    return _finish_or_accept_pending(request, pricing_service, payment)
 
 
 def _prommt_test_enabled(pricing_service: PackagePricingService) -> bool:
@@ -198,7 +200,16 @@ def _prommt_test_enabled(pricing_service: PackagePricingService) -> bool:
     )
 
 
-def _finish_prommt_test_payment(request: Request, payment: dict) -> dict:
+def _finish_or_accept_pending(request: Request, pricing_service: PackagePricingService, payment: dict):
+    """Run the booking. A failed commit keeps booking_work pending and answers 202 (payment is saved)."""
+    try:
+        return _finish_prommt_test_payment(request, pricing_service, payment)
+    except Exception as exc:
+        logger.error("Prommt TEST booking commit failed for payment %s: %s", payment["payment_id"], type(exc).__name__)
+        return JSONResponse(status_code=202, content={"status": "accepted_pending_booking"})
+
+
+def _finish_prommt_test_payment(request: Request, pricing_service: PackagePricingService, payment: dict) -> dict:
     engine = get_booking_operation_engine(request)
     operation = engine.execute_operation(
         ExecuteBookingOperationRequest(
@@ -206,9 +217,10 @@ def _finish_prommt_test_payment(request: Request, payment: dict) -> dict:
             booking_reference=payment["booking_reference"],
             quote_id=payment["quote_id"],
             payment_id=payment["payment_id"],
-            idempotency_key=f"prommt_test_{payment['payment_id']}",
+            idempotency_key=payment.get("booking_idempotency_key") or f"prommt_test_{payment['payment_id']}",
         )
     )
+    pricing_service.complete_booking_work(payment["payment_id"], operation.status)
     return {"status": "processed", "booking_status": operation.status}
 
 

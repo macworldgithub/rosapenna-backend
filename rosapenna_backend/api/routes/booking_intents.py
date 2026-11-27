@@ -124,8 +124,11 @@ def commit_booking_intent(
     if not quote:
         raise HTTPException(404, f"Quote '{request.quote_id}' was not found.")
     current_hash = compute_quote_hash(quote)
-    if request.quote_hash and request.quote_hash != current_hash:
+    if request.quote_hash != current_hash:
         raise HTTPException(409, "Quote content hash does not match current server offer.")
+    accepted = (intent.get("quote") or {}).get("live_revalidated") or {}
+    if accepted.get("quote_id") != request.quote_id or accepted.get("quote_hash") != request.quote_hash:
+        raise HTTPException(409, "Quote does not match the offer accepted for this booking intent.")
 
     # Locate verified payment
     payment_id = None
@@ -217,22 +220,15 @@ def reaccept_offer(
     if expected_hash != request.quote_hash:
         raise HTTPException(409, "Quote content hash mismatch with server offer.")
 
-    # Apply reaccepted quote
-    new_rev = intent["revision"] + 1
-    store.collection.update_one(
-        {"_id": intent_id, "revision": request.expected_revision},
-        {
-            "$set": {
-                "revision": new_rev,
-                "quote.version": new_rev,
-                "quote.live_revalidated": {
-                    "quote_id": quote.quote_id,
-                    "quote_hash": expected_hash,
-                    "amount": str(quote.total_package_price),
-                    "deposit_amount": str(quote.deposit_amount),
-                    "currency": quote.currency or "EUR",
-                },
-            }
-        },
-    )
+    snapshot = {
+        "quote_id": quote.quote_id,
+        "quote_hash": expected_hash,
+        "amount": str(quote.total_package_price),
+        "deposit_amount": str(quote.deposit_amount),
+        "currency": quote.currency or "EUR",
+    }
+    # Terms version comes from the saved server quote, never from the client.
+    terms_version = getattr(quote, "terms_version", None)
+    if not store.record_reaccept(intent_id, request.expected_revision, snapshot, terms_version):
+        raise HTTPException(409, "Booking intent revision changed; reload it before reaccepting")
     return store.get(intent_id)

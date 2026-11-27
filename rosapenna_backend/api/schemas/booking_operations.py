@@ -89,6 +89,9 @@ class BookingOperationRecord(BaseModel):
     payment_id: Optional[str] = None
     payment_verified: bool = False
     vendor_references: Dict[str, Any] = Field(default_factory=dict)
+    # Per-write step records: reference, request hash, state and timestamp only (no guest data).
+    steps: Dict[str, Dict[str, Any]] = Field(default_factory=dict)
+    request_fingerprint: Optional[str] = None
     readback_evidence: Optional[ReadbackEvidence] = None
     staff_alert: Optional[StaffReconciliationAlert] = None
     email_delivery_id: Optional[str] = None

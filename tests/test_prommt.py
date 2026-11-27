@@ -479,8 +479,8 @@ class PrommtRoutedPaymentTests(unittest.TestCase):
         """A failed booking step after verification is retried once with the same idempotency key."""
         self.engine.execute_operation.side_effect = [RuntimeError("test write failure"), MagicMock(status="needs_review")]
         with patch.object(self.client, "get_test_payment_details", return_value=self.details):
-            with self.assertRaisesRegex(RuntimeError, "test write failure"):
-                self.deliver(self.event)
+            failed = self.deliver(self.event)
+            self.assertEqual((failed.status_code, self.stored()["booking_work"]), (202, "pending"))
             self.assertEqual(self.deliver(self.event), {"status": "processed", "booking_status": "needs_review"})
         keys = {call.args[0].idempotency_key for call in self.engine.execute_operation.call_args_list}
         self.assertEqual(keys, {f"prommt_test_{self.link.payment_id}"})

@@ -225,15 +225,17 @@ class TestN06CommitJourney(unittest.TestCase):
 
     def test_simulated_payment_cannot_authorize_live_booking_adapters(self):
         """A paid test record cannot reach availability or vendor writes in unsafe settings."""
-        quote = make_mock_available_quote()
-        self.pricing_service._cache_and_return_quote(quote)
-        for target, field, value in (
+        for index, (target, field, value) in enumerate((
             (self.opera_client.settings, "allow_live_writes", True),
             (self.brs_client.settings, "allow_live_writes", True),
             (self.settings, "environment", "production"),
             (self.settings, "simulation_run_id", "another-test-run"),
-        ):
+        )):
             with self.subTest(field=field, value=value):
+                # One open deposit per quote is enforced, so each pass uses its own quote.
+                quote = make_mock_available_quote()
+                quote.quote_id = f"{quote.quote_id}-{index}"
+                self.pricing_service._cache_and_return_quote(quote)
                 payment = self.pricing_service.create_payment_link(
                     PackagePaymentLinkRequest(
                         quote_id=quote.quote_id,
@@ -406,10 +408,9 @@ class TestN06CommitJourney(unittest.TestCase):
             lookup.return_value = details
             # Simulate interruption after the payment is saved, before booking starts.
             with patch.object(self.engine, "execute_operation", side_effect=RuntimeError("booking interrupted")):
-                with self.assertRaisesRegex(RuntimeError, "booking interrupted"):
-                    deliver(event)
+                self.assertEqual(deliver(event).status_code, 202)
             saved = self.db.package_payments.find_one({"payment_id": link.payment_id})
-            self.assertEqual(saved["status"], "verified_paid")
+            self.assertEqual((saved["status"], saved["booking_work"]), ("verified_paid", "pending"))
             self.assertEqual(saved["prommt_event_id"], event["eventId"])
             self.assertEqual(self.db.booking_operations.count_documents({}), 0)
 
