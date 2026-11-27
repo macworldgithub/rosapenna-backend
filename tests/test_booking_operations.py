@@ -202,6 +202,10 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
             "status": "verified_paid",
             "provider": "prommt",
             "provider_reference": "pmt_req_mock_999",
+            "transaction_id": "txn_mock_999",
+            "paid_at": now_str,
+            "evidence_source": "prommt",
+            "is_test": False,
             "expires_at": future_str,
             "created_at": now_str,
             "lead_guest": {
@@ -249,7 +253,7 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.assertEqual(len(self.brs_client._sandbox_rounds), 0)
 
     def test_successful_new_booking_operation_flow(self):
-        """AC 1, 2, 8: Complete flow verifies payment, revalidates, writes records, and sends itinerary."""
+        """AC 1, 2, 8: Complete flow verifies payment, revalidates, writes records, and records one confirmed event."""
         req = ExecuteBookingOperationRequest(
             idempotency_key="idemp_success_flow_001",
             operation_type="new_booking",
@@ -263,7 +267,7 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.assertEqual(resp.stage, "completed")
         self.assertTrue(resp.readback_verified)
         self.assertFalse(resp.staff_review_required)
-        self.assertIsNotNone(resp.email_delivery_id)
+        self.assertIsNone(resp.email_delivery_id)
 
         # Verify operation record persistence
         op_record = self.engine.get_operation(resp.operation_id)
@@ -275,11 +279,12 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.assertTrue(op_record.readback_evidence.brs_verified)
         self.assertEqual(len(op_record.readback_evidence.brs_round_ids), 2)
 
-        # Verify email dispatched once in sandbox
-        self.assertEqual(len(self.email_service._dispatched_emails), 1)
-        self.assertEqual(self.email_service._dispatched_emails[0]["recipient"], "jack@example.com")
+        # N06 records the handoff event only; N07 owns delivery.
+        self.assertEqual(self.email_service._dispatched_emails, [])
+        self.assertEqual(op_record.confirmed_event["event_id"], f"EVT-{resp.operation_id}")
+        self.assertFalse(op_record.confirmed_event["is_test"])
 
-    def test_notification_exception_keeps_verified_booking_complete(self):
+    def test_commit_never_calls_mail_adapter(self):
         req = ExecuteBookingOperationRequest(
             idempotency_key="idemp_notification_exception_001",
             operation_type="new_booking",
@@ -287,28 +292,20 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
             quote_id=self.sample_quote.quote_id,
         )
 
-        saved_before_delivery = []
-
-        def fail_delivery(*, booking, idempotency_key):
-            operation_id = idempotency_key.removeprefix("email_")
-            saved_before_delivery.append(self.engine.get_operation(operation_id))
-            raise RuntimeError("test transport timed out")
-
-        with patch.object(self.email_service, "send_booking_confirmation", side_effect=fail_delivery) as send:
+        with patch.object(
+            self.email_service, "send_booking_confirmation", side_effect=RuntimeError("mail unavailable"),
+        ) as send:
             result = self.engine.execute_operation(req)
             replay = self.engine.execute_operation(req)
 
-        self.assertEqual(send.call_count, 1)
-        self.assertEqual(saved_before_delivery[0].stage, "completed")
-        self.assertTrue(saved_before_delivery[0].readback_evidence.opera_verified)
-        self.assertTrue(saved_before_delivery[0].readback_evidence.brs_verified)
+        send.assert_not_called()
         self.assertEqual(result.status, "confirmed")
         self.assertIsNone(result.email_delivery_id)
         self.assertEqual(replay.operation_id, result.operation_id)
         self.assertEqual(replay.status, "confirmed")
         saved = self.engine.get_operation(result.operation_id)
-        self.assertIn("outcome unknown", saved.stage_history[-1].details)
-        self.assertNotIn("timed out", saved.stage_history[-1].details)
+        self.assertEqual(saved.stage, "completed")
+        self.assertIn("Delivery is handled separately", saved.stage_history[-1].details)
 
     def test_existing_linkage_for_different_round_does_not_confirm_booking(self):
         req = ExecuteBookingOperationRequest(
@@ -493,8 +490,9 @@ class SafeBookingOperationEngineTests(unittest.TestCase):
         self.assertEqual(resp1.operation_id, resp2.operation_id)
         self.assertEqual(resp1.email_delivery_id, resp2.email_delivery_id)
 
-        # Verify no duplicate email dispatch
-        self.assertEqual(len(self.email_service._dispatched_emails), 1)
+        # N06 commit sends no email; the single confirmed event is unchanged by replay.
+        self.assertEqual(len(self.email_service._dispatched_emails), 0)
+        self.assertEqual(self.db["booking_operations"].count_documents({"confirmed_event": {"$ne": None}}), 1)
 
     def test_revalidation_room_sold_out_enters_unconfirmed_reconciliation(self):
         """AC 2, 6, 7: Post-payment inventory sell-out halts operation as unconfirmed and alerts staff."""

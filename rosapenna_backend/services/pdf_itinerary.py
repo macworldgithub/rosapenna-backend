@@ -5,15 +5,33 @@ from __future__ import annotations
 import datetime as dt
 import html
 import io
+import re
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any, Dict
+from xml.sax.saxutils import escape as xml_escape
 
 if TYPE_CHECKING:
     from rosapenna_backend.api.schemas.communications import BookingConfirmationSnapshot
 
 from reportlab.lib import colors
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import A4, letter
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
-from reportlab.platypus import HRFlowable, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+from reportlab.pdfbase.pdfmetrics import stringWidth
+from reportlab.pdfgen.canvas import Canvas
+from reportlab.platypus import (
+    BaseDocTemplate,
+    CondPageBreak,
+    Flowable,
+    Frame,
+    HRFlowable,
+    KeepTogether,
+    PageTemplate,
+    Paragraph,
+    SimpleDocTemplate,
+    Spacer,
+    Table,
+    TableStyle,
+)
 
 # Brand colors
 GOLD = colors.HexColor("#DBB155")
@@ -382,328 +400,655 @@ def build_itinerary_pdf(booking: Dict[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
-def build_n07_confirmation_pdf(snapshot: BookingConfirmationSnapshot) -> bytes:
-    """Render an authoritative, strict PDF booking confirmation for Ticket N07.
+# ==============================================================================
+# Ticket N07: guest booking-confirmation PDF (strict snapshot renderer)
+# ==============================================================================
 
-    Guarantees:
-    - Escapes all input strings before inserting into ReportLab Paragraphs.
-    - Explicit 'TEST — NOT A REAL BOOKING CONFIRMATION' watermark/banner.
-    - Uses exact validated financial amounts and currencies (no defaulting/guessing).
-    - Caps PDF output size to 2 MiB.
-    """
-    buffer = io.BytesIO()
-    doc = SimpleDocTemplate(
-        buffer,
-        pagesize=letter,
-        leftMargin=36,
-        rightMargin=36,
-        topMargin=36,
-        bottomMargin=36,
-    )
+RESORT_NAME = "Rosapenna Hotel & Golf Resort"
+RESORT_ADDRESS = "Downings, Sheephaven Bay, Co. Donegal, Ireland"
+DEFAULT_RESERVATIONS_EMAIL = "reservations@rosapenna.ie"
+RESERVATIONS_PHONE = "+353 (0)74 915 5301"
+TEST_BANNER_TITLE = "TEST BOOKING – NOT A REAL RESERVATION"
+TEST_LABEL = "TEST — NOT A REAL BOOKING CONFIRMATION"
 
-    styles = getSampleStyleSheet()
+# Extra palette for the guest confirmation (legacy colours above stay unchanged).
+MID_GREEN = colors.HexColor("#2F5D3F")
+PALE_GREEN = colors.HexColor("#EEF3EE")
+CREAM = colors.HexColor("#F7F3E8")
+INK_MUTED = colors.HexColor("#4B5563")  # 7.6:1 on white, 6.9:1 on CREAM
+ALERT_RED = colors.HexColor("#B91C1C")
+RULE_GREY = colors.HexColor("#D5DBD6")
 
-    # Reusable styles
-    title_style = ParagraphStyle(
-        "N07DocTitle",
-        parent=styles["Heading1"],
-        fontName="Helvetica-Bold",
-        fontSize=18,
-        leading=22,
-        textColor=DARK_GREEN,
-    )
-    subtitle_style = ParagraphStyle(
-        "N07DocSubtitle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=9.5,
-        leading=13,
-        textColor=TEXT_MUTED,
-    )
-    banner_style = ParagraphStyle(
-        "N07TestBanner",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=11,
-        leading=14,
-        textColor=colors.HexColor("#B91C1C"),
-        alignment=1,  # Center
-    )
-    section_heading = ParagraphStyle(
-        "N07SectionHeading",
-        parent=styles["Heading2"],
-        fontName="Helvetica-Bold",
-        fontSize=12,
-        leading=16,
-        textColor=DARK_GREEN,
-        spaceAfter=6,
-    )
-    label_style = ParagraphStyle(
-        "N07LabelStyle",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8.5,
-        leading=11,
-        textColor=TEXT_DARK,
-    )
-    value_style = ParagraphStyle(
-        "N07ValueStyle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8.5,
-        leading=11,
-        textColor=TEXT_DARK,
-    )
-    table_cell = ParagraphStyle(
-        "N07TableCell",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=8,
-        leading=11,
-        textColor=TEXT_DARK,
-    )
-    table_header = ParagraphStyle(
-        "N07TableHeader",
-        parent=styles["Normal"],
-        fontName="Helvetica-Bold",
-        fontSize=8,
-        leading=11,
-        textColor=colors.white,
-    )
-    footer_style = ParagraphStyle(
-        "N07FooterStyle",
-        parent=styles["Normal"],
-        fontName="Helvetica",
-        fontSize=7.5,
-        leading=10,
-        textColor=TEXT_MUTED,
-        alignment=1,
-    )
+_PAGE_W, _PAGE_H = A4
+_MARGIN = 40
+_CONTENT_W = _PAGE_W - 2 * _MARGIN
+_FIRST_HEADER_H = 118
+_LATER_HEADER_H = 34
+_FOOTER_H = 70
+_MIN_SECTION_SPACE = 150  # start a table section on a new page when less room than this is left
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+_WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+_CURRENCY_SYMBOLS = {"EUR": "€", "GBP": "£", "USD": "$"}
+_PAYMENT_PURPOSES = {"deposit": "Deposit", "balance": "Balance payment", "full": "Payment in full"}
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_MAILBOX = re.compile(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,63}@[A-Za-z0-9](?:[A-Za-z0-9.-]{0,61}[A-Za-z0-9])?\.[A-Za-z]{2,63}")
 
-    elements = []
 
-    # 1. Test Warning Banner
-    banner_data = [[Paragraph("TEST — NOT A REAL BOOKING CONFIRMATION", banner_style)]]
-    banner_table = Table(banner_data, colWidths=[540])
-    banner_table.setStyle(TableStyle([
+def _esc(value: Any) -> str:
+    """Escape one value for ReportLab paragraph markup (guest text is never markup)."""
+    return xml_escape(_CONTROL_CHARS.sub("", str(value)))
+
+
+def _esc_lines(value: Any) -> str:
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return _esc(text).replace("\n", "<br/>")
+
+
+def _long_date(value: Any, weekday: bool = True) -> str:
+    try:
+        day = dt.date.fromisoformat(str(value)[:10])
+    except ValueError:
+        return _esc(value)
+    text = f"{day.day} {_MONTHS[day.month - 1]} {day.year}"
+    return f"{_WEEKDAYS[day.weekday()]} {text}" if weekday else text
+
+
+def _money(currency: str, amount: Any) -> str:
+    try:
+        number = f"{Decimal(str(amount)):,.2f}"
+    except InvalidOperation:
+        return _esc(f"{currency} {amount}")
+    symbol = _CURRENCY_SYMBOLS.get(currency)
+    return _esc(f"{symbol}{number}" if symbol else f"{currency} {number}")
+
+
+def _is_positive(amount: Any) -> bool:
+    try:
+        return Decimal(str(amount)) > 0
+    except InvalidOperation:
+        return False
+
+
+def _plural(count: int, word: str) -> str:
+    return f"{count} {word}" if count == 1 else f"{count} {word}s"
+
+
+def _fit_lines(text: str, font: str, max_size: float, min_size: float, width: float) -> tuple[float, list[str]]:
+    """Return a font size and lines so a long unbroken value stays inside width."""
+    size = max_size
+    while size > min_size and stringWidth(text, font, size) > width:
+        size -= 0.5
+    lines: list[str] = []
+    current = ""
+    for char in text:
+        if current and stringWidth(current + char, font, size) > width:
+            lines.append(current)
+            current = ""
+        current += char
+    lines.append(current)
+    return size, lines
+
+
+def _styles() -> dict[str, ParagraphStyle]:
+    def style(name: str, **kwargs: Any) -> ParagraphStyle:
+        base: dict[str, Any] = {"fontName": "Helvetica", "fontSize": 9, "leading": 12.5, "textColor": TEXT_DARK}
+        base.update(kwargs)
+        return ParagraphStyle(f"N07{name}", **base)
+
+    return {
+        "greeting": style("Greeting", fontName="Times-Bold", fontSize=14, leading=18, textColor=DARK_GREEN, spaceAfter=4),
+        "body": style("Body", fontSize=9.5, leading=14),
+        "small": style("Small", fontSize=8, leading=11, textColor=INK_MUTED),
+        "h2": style("H2", fontName="Times-Bold", fontSize=14, leading=18, textColor=DARK_GREEN, keepWithNext=1),
+        "card_title": style("CardTitle", fontName="Helvetica-Bold", fontSize=8.5, leading=11, textColor=MID_GREEN),
+        "label": style("Label", fontSize=8, leading=11, textColor=INK_MUTED),
+        "value": style("Value", fontSize=9, leading=12),
+        "balance": style("Balance", fontName="Helvetica-Bold", fontSize=12, leading=15, textColor=ALERT_RED),
+        "th": style("TH", fontName="Helvetica-Bold", fontSize=8, leading=11, textColor=colors.white),
+        "td": style("TD", fontSize=8.5, leading=11.5),
+        "note": style("Note", fontSize=8.5, leading=12, leftIndent=10, bulletIndent=0),
+        "step_title": style("StepTitle", fontName="Helvetica-Bold", fontSize=9.5, leading=13, textColor=DARK_GREEN),
+        "terms": style("Terms", fontSize=8, leading=11, textColor=INK_MUTED, leftIndent=6, rightIndent=6,
+                       backColor=CREAM, borderColor=RULE_GREY, borderWidth=0.5, borderPadding=6),
+        "banner_title": style("BannerTitle", fontName="Helvetica-Bold", fontSize=12, leading=15, textColor=ALERT_RED, alignment=1),
+        "banner_text": style("BannerText", fontSize=8.5, leading=11.5, textColor=ALERT_RED, alignment=1),
+    }
+
+
+def _section(title: str, s: dict[str, ParagraphStyle]) -> list[Any]:
+    return [Paragraph(_esc(title), s["h2"]), HRFlowable(width="100%", thickness=0.8, color=GOLD, spaceBefore=1, spaceAfter=7)]
+
+
+class _StepDot(Flowable):
+    """Small numbered circle for the 'What happens next' list."""
+
+    def __init__(self, number: int) -> None:
+        super().__init__()
+        self.number = number
+        self.width = self.height = 20
+
+    def wrap(self, avail_width: float, avail_height: float) -> tuple[float, float]:
+        return self.width, self.height
+
+    def draw(self) -> None:
+        self.canv.setFillColor(DARK_GREEN)
+        self.canv.circle(10, 10, 9, stroke=0, fill=1)
+        self.canv.setFillColor(colors.white)
+        self.canv.setFont("Helvetica-Bold", 9)
+        self.canv.drawCentredString(10, 6.8, str(self.number))
+
+
+def _test_banner(s: dict[str, ParagraphStyle]) -> list[Any]:
+    table = Table(
+        [[[Paragraph(_esc(TEST_BANNER_TITLE), s["banner_title"]),
+           Paragraph(_esc(f"{TEST_LABEL}. This document was produced from a simulated test booking."), s["banner_text"])]]],
+        colWidths=[_CONTENT_W],
+    )
+    table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, -1), colors.HexColor("#FEE2E2")),
-        ("BOX", (0, 0), (-1, -1), 1, colors.HexColor("#EF4444")),
-        ("TOPPADDING", (0, 0), (-1, -1), 6),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ("BOX", (0, 0), (-1, -1), 1.2, ALERT_RED),
+        ("TOPPADDING", (0, 0), (-1, -1), 7),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 7),
     ]))
-    elements.append(banner_table)
-    elements.append(Spacer(1, 10))
+    return [table, Spacer(1, 12)]
 
-    # 2. Header with resort branding
-    ref = html.escape(snapshot.booking_reference)
-    rev = snapshot.booking_revision
-    header_data = [
-        [
-            Paragraph("ROSAPENNA HOTEL & GOLF RESORT", title_style),
-            Paragraph(f"<b>BOOKING REFERENCE</b><br/><font size='12' color='#1A3323'><b>{ref}</b></font>", ParagraphStyle("N07Ref", alignment=2, fontName="Helvetica", leading=16)),
-        ],
-        [
-            Paragraph("Downings, Sheephaven Bay, Co. Donegal, Ireland &bull; reservations@rosapenna.ie", subtitle_style),
-            Paragraph(f"Revision: <b>#{rev}</b> &bull; Status: <b>Confirmed (Test)</b>", ParagraphStyle("N07Status", alignment=2, fontName="Helvetica", fontSize=8.5, textColor=DARK_GREEN)),
-        ],
-    ]
-    header_table = Table(header_data, colWidths=[340, 200])
-    header_table.setStyle(TableStyle([
-        ("VALIGN", (0, 0), (-1, -1), "TOP"),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 2),
-        ("TOPPADDING", (0, 0), (-1, -1), 0),
-    ]))
-    elements.append(header_table)
-    elements.append(Spacer(1, 8))
-    elements.append(HRFlowable(width="100%", thickness=1.5, color=GOLD, spaceAfter=12))
 
-    # 3. Lead Guest Details
-    lead = snapshot.lead_guest
-    guest_name = html.escape(f"{lead.first_name} {lead.last_name}")
-    guest_email = html.escape(lead.email)
-    guest_phone = html.escape(lead.telephone or "Not provided")
-    confirmed_date = html.escape(snapshot.confirmed_at[:10])
-
-    guest_data = [
-        [
-            Paragraph("Lead Guest:", label_style),
-            Paragraph(guest_name, value_style),
-            Paragraph("Email Address:", label_style),
-            Paragraph(guest_email, value_style),
-        ],
-        [
-            Paragraph("Telephone:", label_style),
-            Paragraph(guest_phone, value_style),
-            Paragraph("Confirmation Date:", label_style),
-            Paragraph(confirmed_date, value_style),
-        ],
-    ]
-    guest_table = Table(guest_data, colWidths=[80, 190, 95, 175])
-    guest_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BG),
-        ("BOX", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(guest_table)
-    elements.append(Spacer(1, 12))
-
-    # 4. Stay Accommodation
-    elements.append(Paragraph("Accommodation Details", section_heading))
-    stay_dates_text = f"<b>Arrival:</b> {html.escape(snapshot.stay.arrival_date)} &nbsp;&bull;&nbsp; <b>Departure:</b> {html.escape(snapshot.stay.departure_date)}"
-    elements.append(Paragraph(stay_dates_text, table_cell))
-    elements.append(Spacer(1, 6))
-
-    room_rows = [
-        [
-            Paragraph("<b>Room Group</b>", table_header),
-            Paragraph("<b>Category / Type</b>", table_header),
-            Paragraph("<b>Quantity</b>", table_header),
-            Paragraph("<b>Assigned Occupants</b>", table_header),
-        ]
-    ]
-    for r in snapshot.stay.rooms:
-        rg = html.escape(r.room_group_id)
-        cat = html.escape(r.room_category.replace("_", " ").title())
-        qty = str(r.room_quantity)
-        occ = html.escape(", ".join(r.occupant_names) if r.occupant_names else "Names not supplied")
-        room_rows.append([
-            Paragraph(rg, table_cell),
-            Paragraph(cat, table_cell),
-            Paragraph(qty, table_cell),
-            Paragraph(occ, table_cell),
-        ])
-
-    rooms_table = Table(room_rows, colWidths=[80, 180, 60, 220])
-    rooms_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, 0), DARK_GREEN),
-        ("BOX", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-        ("TOPPADDING", (0, 0), (-1, -1), 4),
-        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-    ]))
-    elements.append(rooms_table)
-    elements.append(Spacer(1, 12))
-
-    # 5. Championship Golf Rounds
-    if snapshot.golf_rounds:
-        elements.append(Paragraph("Championship Golf Itinerary", section_heading))
-        golf_rows = [
-            [
-                Paragraph("<b>Date</b>", table_header),
-                Paragraph("<b>Tee Time</b>", table_header),
-                Paragraph("<b>Course</b>", table_header),
-                Paragraph("<b>Players</b>", table_header),
-                Paragraph("<b>Golfer Names</b>", table_header),
-                Paragraph("<b>Holes</b>", table_header),
-            ]
-        ]
-        for g in snapshot.golf_rounds:
-            g_date = html.escape(g.date)
-            g_time = html.escape(f"{g.tee_time} ({g.timezone})")
-            g_course = html.escape(g.course_name)
-            g_players = f"{g.players} golfer{'s' if g.players > 1 else ''}"
-            g_names = html.escape(", ".join(g.golfer_names) if g.golfer_names else "Names not supplied")
-            g_holes = f"{g.holes} Holes"
-            golf_rows.append([
-                Paragraph(g_date, table_cell),
-                Paragraph(g_time, table_cell),
-                Paragraph(g_course, table_cell),
-                Paragraph(g_players, table_cell),
-                Paragraph(g_names, table_cell),
-                Paragraph(g_holes, table_cell),
-            ])
-
-        golf_table = Table(golf_rows, colWidths=[60, 85, 135, 55, 150, 55])
-        golf_table.setStyle(TableStyle([
-            ("BACKGROUND", (0, 0), (-1, 0), DARK_GREEN),
-            ("BOX", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-            ("INNERGRID", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-            ("TOPPADDING", (0, 0), (-1, -1), 4),
-            ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
-            ("LEFTPADDING", (0, 0), (-1, -1), 6),
-            ("RIGHTPADDING", (0, 0), (-1, -1), 6),
-        ]))
-        elements.append(golf_table)
-        elements.append(Spacer(1, 12))
-
-    # 6. Financial Settlement & Balances
-    elements.append(Paragraph("Payment & Balance Summary", section_heading))
+def _payment_sentence(snapshot: "BookingConfirmationSnapshot") -> str:
     fin = snapshot.financials
-    curr = html.escape(fin.currency)
-    tot = html.escape(fin.total_amount)
-    dep = html.escape(fin.deposit_paid)
-    paid = html.escape(fin.verified_paid_total)
-    bal = html.escape(fin.balance_due)
-    due_date = html.escape(fin.balance_due_date)
+    due = _long_date(fin.balance_due_date)
+    if not _is_positive(fin.balance_due):
+        return "Your booking is paid in full. Thank you."
+    balance = _money(fin.currency, fin.balance_due)
+    if _is_positive(fin.verified_paid_total):
+        paid = _money(fin.currency, fin.verified_paid_total)
+        return f"We have received your payment of {paid}. The remaining balance of <b>{balance}</b> is due by <b>{due}</b>."
+    return f"The balance of <b>{balance}</b> is due by <b>{due}</b>."
 
-    finance_data = [
+
+def _welcome_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    lead = snapshot.lead_guest
+    stay = snapshot.stay
+    try:
+        nights = (dt.date.fromisoformat(stay.departure_date) - dt.date.fromisoformat(stay.arrival_date)).days
+        stay_text = f"Your {nights}-night stay and {_plural(len(snapshot.golf_rounds), 'round')} of golf are set out below."
+    except ValueError:
+        stay_text = "Your stay and golf are set out below."
+    intro = (
+        f"Thank you for choosing {_esc(RESORT_NAME)}. We are delighted to confirm your Stay &amp; Play booking "
+        f"and look forward to welcoming you on <b>{_long_date(stay.arrival_date)}</b>. {stay_text} "
+        "Please check every detail and contact our Reservations team as soon as possible if anything needs correcting. "
+        f"{_payment_sentence(snapshot)}"
+    )
+    if snapshot.booking_revision > 1:
+        intro += f" This is revision {snapshot.booking_revision} of your booking and replaces any earlier confirmation."
+
+    contact_cells = [
+        [Paragraph("Lead guest", s["label"]), Paragraph("Email", s["label"]), Paragraph("Telephone", s["label"])],
         [
-            Paragraph("Total Stay & Play Amount:", label_style),
-            Paragraph(f"<b>{curr} {tot}</b>", value_style),
-            Paragraph("Deposit Paid:", label_style),
-            Paragraph(f"<b>{curr} {dep}</b>", value_style),
-        ],
-        [
-            Paragraph("Total Verified Paid:", label_style),
-            Paragraph(f"<b>{curr} {paid}</b>", value_style),
-            Paragraph("Remaining Balance Due:", label_style),
-            Paragraph(f"<font color='#B91C1C'><b>{curr} {bal}</b></font>", value_style),
-        ],
-        [
-            Paragraph("Balance Due Date:", label_style),
-            Paragraph(f"<b>{due_date}</b>", value_style),
-            Paragraph("Currency:", label_style),
-            Paragraph(f"<b>{curr}</b>", value_style),
+            Paragraph(f"<b>{_esc(lead.first_name)} {_esc(lead.last_name)}</b>", s["value"]),
+            Paragraph(_esc(lead.email), s["value"]),
+            Paragraph(_esc(lead.telephone or "Not provided"), s["value"]),
         ],
     ]
-    finance_table = Table(finance_data, colWidths=[170, 100, 150, 120])
-    finance_table.setStyle(TableStyle([
-        ("BACKGROUND", (0, 0), (-1, -1), LIGHT_BG),
-        ("BOX", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
-        ("INNERGRID", (0, 0), (-1, -1), 0.5, BORDER_COLOR),
+    strip = Table(contact_cells, colWidths=[_CONTENT_W * 0.34, _CONTENT_W * 0.40, _CONTENT_W * 0.26])
+    strip.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), PALE_GREEN),
+        ("LINEBELOW", (0, -1), (-1, -1), 0.8, MID_GREEN),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("TOPPADDING", (0, 0), (-1, 0), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, 0), 0),
+        ("TOPPADDING", (0, 1), (-1, 1), 1),
+        ("BOTTOMPADDING", (0, 1), (-1, 1), 6),
+    ]))
+    return [
+        Paragraph(f"Dear {_esc(lead.first_name)} {_esc(lead.last_name)},", s["greeting"]),
+        Paragraph(intro, s["body"]),
+        Spacer(1, 9),
+        strip,
+        Spacer(1, 14),
+    ]
+
+
+def _card(title: str, rows: list[tuple[str, Any]], width: float, s: dict[str, ParagraphStyle]) -> list[Any]:
+    label_w = 82
+    inner = Table(
+        [[Paragraph(label, s["label"]), Paragraph(value, s["value"]) if isinstance(value, str) else value] for label, value in rows],
+        colWidths=[label_w, width - 20 - label_w],
+    )
+    inner.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 3),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 3),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE_GREY),
+    ]))
+    return [Paragraph(_esc(title.upper()), s["card_title"]), Spacer(1, 3), inner]
+
+
+def _room_type(room: Any) -> str:
+    quantity = f" × {room.room_quantity} rooms" if room.room_quantity != 1 else ""
+    return f"{_esc(room.room_category.replace('_', ' ').title())}{quantity}"
+
+
+def _rooming_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    rows: list[list[Any]] = [[Paragraph(label, s["th"]) for label in ("Room", "Type", "Guests")]]
+    for index, room in enumerate(snapshot.stay.rooms, start=1):
+        names = _esc(", ".join(room.occupant_names)) if room.occupant_names else "Names to be confirmed before arrival"
+        rows.append([Paragraph(f"Room {index}", s["td"]), Paragraph(f"<b>{_room_type(room)}</b>", s["td"]), Paragraph(names, s["td"])])
+    table = Table(rows, colWidths=[60, 150, _CONTENT_W - 210], repeatRows=1)
+    table.setStyle(_table_style())
+    return [CondPageBreak(_MIN_SECTION_SPACE), *_section("Rooms & Guests", s), table, Spacer(1, 16)]
+
+
+def _summary_cards(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    stay = snapshot.stay
+    fin = snapshot.financials
+    gap = 14
+    card_w = (_CONTENT_W - gap) / 2
+
+    try:
+        nights_text = str((dt.date.fromisoformat(stay.departure_date) - dt.date.fromisoformat(stay.arrival_date)).days)
+    except ValueError:
+        nights_text = "–"
+    stay_rows: list[tuple[str, Any]] = [
+        ("Arrival", f"<b>{_long_date(stay.arrival_date)}</b>"),
+        ("Departure", f"<b>{_long_date(stay.departure_date)}</b>"),
+        ("Nights", nights_text),
+    ]
+    guest_total = sum(len(room.occupant_names) for room in stay.rooms)
+    # A card row cannot split across pages, so large groups get a separate splittable rooming table.
+    inline_names = len(stay.rooms) <= 3 and guest_total <= 8
+    for index, room in enumerate(stay.rooms, start=1):
+        label = "Room" if len(stay.rooms) == 1 else f"Room {index}"
+        names = ""
+        if inline_names and room.occupant_names:
+            names = f"<br/><font color='#4B5563'>Guests: {_esc(', '.join(room.occupant_names))}</font>"
+        stay_rows.append((label, f"<b>{_room_type(room)}</b>{names}"))
+    stay_rows.append((
+        "Guests",
+        _plural(guest_total, "guest") if guest_total else "Names to be confirmed before arrival",
+    ))
+
+    pay_rows: list[tuple[str, Any]] = [
+        ("Total price", f"<b>{_money(fin.currency, fin.total_amount)}</b>"),
+        ("Deposit paid", _money(fin.currency, fin.deposit_paid)),
+    ]
+    if fin.verified_paid_total != fin.deposit_paid:
+        pay_rows.append(("Total paid to date", _money(fin.currency, fin.verified_paid_total)))
+    if _is_positive(fin.balance_due):
+        pay_rows.append(("Balance due", Paragraph(_money(fin.currency, fin.balance_due), s["balance"])))
+        pay_rows.append(("Balance due by", f"<b>{_long_date(fin.balance_due_date)}</b>"))
+    else:
+        pay_rows.append(("Balance due", f"<b>{_money(fin.currency, fin.balance_due)}</b> – paid in full"))
+    pay_rows.append(("Currency", _esc(fin.currency)))
+
+    outer = Table(
+        [[_card("Your stay", stay_rows, card_w, s), "", _card("Payment summary", pay_rows, card_w, s)]],
+        colWidths=[card_w, gap, card_w],
+    )
+    outer.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (0, 0), CREAM),
+        ("BACKGROUND", (2, 0), (2, 0), CREAM),
+        ("BOX", (0, 0), (0, 0), 0.5, RULE_GREY),
+        ("BOX", (2, 0), (2, 0), 0.5, RULE_GREY),
+        ("LINEABOVE", (0, 0), (0, 0), 2.5, DARK_GREEN),
+        ("LINEABOVE", (2, 0), (2, 0), 2.5, DARK_GREEN),
+        ("LEFTPADDING", (0, 0), (-1, -1), 10),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 10),
+        ("TOPPADDING", (0, 0), (-1, -1), 9),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+        ("LEFTPADDING", (1, 0), (1, 0), 0),
+        ("RIGHTPADDING", (1, 0), (1, 0), 0),
+    ]))
+    return [outer, Spacer(1, 16), *([] if inline_names else _rooming_block(snapshot, s))]
+
+
+def _table_style() -> TableStyle:
+    return TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("BACKGROUND", (0, 0), (-1, 0), DARK_GREEN),
+        ("BOX", (0, 0), (-1, -1), 0.5, RULE_GREY),
+        ("LINEBELOW", (0, 0), (-1, -2), 0.4, RULE_GREY),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, PALE_GREEN]),
         ("TOPPADDING", (0, 0), (-1, -1), 5),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
-        ("LEFTPADDING", (0, 0), (-1, -1), 6),
-        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
+        ("LEFTPADDING", (0, 0), (-1, -1), 7),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 7),
+    ])
+
+
+def _golf_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    if not snapshot.golf_rounds:
+        return []
+    rows: list[list[Any]] = [[Paragraph(label, s["th"]) for label in ("Day", "Course", "Tee time", "Players")]]
+    for rnd in sorted(snapshot.golf_rounds, key=lambda item: (item.date, item.tee_time)):
+        try:
+            weekday = _WEEKDAYS[dt.date.fromisoformat(rnd.date).weekday()]
+            day_text = f"<b>{weekday}</b><br/>{_long_date(rnd.date, weekday=False)}"
+        except ValueError:
+            day_text = _esc(rnd.date)
+        names = _esc(", ".join(rnd.golfer_names)) if rnd.golfer_names else "Names not yet supplied"
+        rows.append([
+            Paragraph(day_text, s["td"]),
+            Paragraph(f"<b>{_esc(rnd.course_name)}</b><br/><font color='#4B5563'>{rnd.holes} holes</font>", s["td"]),
+            Paragraph(f"<b>{_esc(rnd.tee_time)}</b><br/><font size='7' color='#4B5563'>{_esc(rnd.timezone)}</font>", s["td"]),
+            Paragraph(f"<b>{_plural(rnd.players, 'player')}</b><br/><font color='#4B5563'>{names}</font>", s["td"]),
+        ])
+    widths = [82, 150, 66]
+    table = Table(rows, colWidths=widths + [_CONTENT_W - sum(widths)], repeatRows=1)
+    table.setStyle(_table_style())
+
+    bullets = [
+        "Please arrive at least <b>30 minutes before your tee time</b>.",
+        "Your tee times are held under this booking reference. Please quote it when you arrive.",
+        "Smart, traditional golf attire is required, and soft spikes only please.",
+        "Caddies can be requested, subject to availability, and are paid for on the day. "
+        "We will invite your requests in your pre-arrival email.",
+    ]
+    notes = Table([[[Paragraph(text, s["note"], bulletText="•") for text in bullets]]], colWidths=[_CONTENT_W])
+    notes.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), PALE_GREEN),
+        ("LINEBEFORE", (0, 0), (0, -1), 2.5, MID_GREEN),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 6),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 4),
     ]))
-    elements.append(finance_table)
-    elements.append(Spacer(1, 14))
+    return [CondPageBreak(_MIN_SECTION_SPACE), *_section("Your Golf Itinerary", s), table, Spacer(1, 6), notes, Spacer(1, 16)]
 
-    if snapshot.payments:
-        elements.append(Paragraph("Verified Payments", section_heading))
-        payment_rows = [[
-            Paragraph("<b>Purpose</b>", table_header),
-            Paragraph("<b>Amount</b>", table_header),
-            Paragraph("<b>Verified At</b>", table_header),
-        ]]
-        for payment in snapshot.payments:
-            payment_rows.append([
-                Paragraph(html.escape(payment.payment_purpose.title()), table_cell),
-                Paragraph(f"{html.escape(payment.currency)} {html.escape(payment.amount)}", table_cell),
-                Paragraph(html.escape(payment.verified_at), table_cell),
-            ])
-        elements.append(Table(payment_rows, colWidths=[150, 150, 240], repeatRows=1))
-        elements.append(Spacer(1, 14))
 
-    # 7. Terms and Policies
-    elements.append(Paragraph("Resort Information & Terms", section_heading))
-    policy_text = snapshot.content.policy_text
-    if not policy_text or not policy_text.strip():
+def _payments_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    if not snapshot.payments:
+        return []
+    rows: list[list[Any]] = [[Paragraph(label, s["th"]) for label in ("Payment", "Amount", "Received", "Receipt reference")]]
+    for payment in snapshot.payments:
+        rows.append([
+            Paragraph(_esc(_PAYMENT_PURPOSES.get(payment.payment_purpose, payment.payment_purpose.title())), s["td"]),
+            Paragraph(f"<b>{_money(payment.currency, payment.amount)}</b>", s["td"]),
+            Paragraph(_long_date(payment.verified_at, weekday=False), s["td"]),
+            Paragraph(_esc(payment.receipt_reference or "–"), s["td"]),
+        ])
+    widths = [120, 100, 110]
+    table = Table(rows, colWidths=widths + [_CONTENT_W - sum(widths)], repeatRows=1)
+    table.setStyle(_table_style())
+    return [KeepTogether([*_section("Payments Received", s), table]), Spacer(1, 16)]
+
+
+def _next_steps_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    fin = snapshot.financials
+    if _is_positive(fin.balance_due):
+        first = (
+            "Balance reminder",
+            f"We will email you a reminder before your balance of {_money(fin.currency, fin.balance_due)} "
+            f"falls due on {_long_date(fin.balance_due_date)}.",
+        )
+    else:
+        first = ("Payment complete", "Your balance is settled and no further payment is due.")
+    steps = [
+        first,
+        (
+            "Pre-arrival email",
+            "Before you arrive we will email you so that you can confirm who is staying in each room "
+            "(your rooming list) and send us any caddy requests. Caddy requests are subject to availability.",
+        ),
+        (
+            "Arrival",
+            f"We look forward to welcoming you on {_long_date(snapshot.stay.arrival_date)}. "
+            "The hotel allocates room numbers shortly before you arrive. Please quote your booking reference at check-in.",
+        ),
+    ]
+    rows = [
+        [_StepDot(number), [Paragraph(_esc(title), s["step_title"]), Paragraph(text, s["body"])]]
+        for number, (title, text) in enumerate(steps, start=1)
+    ]
+    table = Table(rows, colWidths=[30, _CONTENT_W - 30])
+    table.setStyle(TableStyle([
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("LEFTPADDING", (0, 0), (-1, -1), 0),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 0),
+        ("TOPPADDING", (0, 0), (-1, -1), 5),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+        ("LINEBELOW", (1, 0), (1, -2), 0.4, RULE_GREY),
+    ]))
+    return [KeepTogether([*_section("What Happens Next", s), table]), Spacer(1, 16)]
+
+
+def _terms_block(snapshot: "BookingConfirmationSnapshot", s: dict[str, ParagraphStyle]) -> list[Any]:
+    version = _esc(snapshot.terms_version)
+    policy = (snapshot.content.policy_text or "").strip()
+    heading = _section("Terms & Conditions", s)
+    version_line = Paragraph(f"Terms version: {version}", s["small"])
+    if policy:
+        body = Paragraph(_esc_lines(policy), s["terms"])
+    else:
+        # Placeholder only: the approved terms wording is not in the snapshot, so none is invented here.
+        body = Paragraph(
+            f"<b>Booking terms: see your reservation terms (version {version}).</b><br/>"
+            "This document does not reproduce the full terms. Please contact our Reservations team if you would like a copy.",
+            s["terms"],
+        )
+    return [
+        CondPageBreak(_MIN_SECTION_SPACE),
+        *heading,
+        version_line,
+        Spacer(1, 6),
+        body,
+        Spacer(1, 16),
+    ]
+
+
+def _contact_block(email: str, reference: str, s: dict[str, ParagraphStyle]) -> list[Any]:
+    text = [
+        Paragraph("Questions about your booking?", s["step_title"]),
+        Paragraph(
+            "Our Reservations team is happy to help with any question or change. "
+            f"Email <b>{_esc(email)}</b> or telephone <b>{_esc(RESERVATIONS_PHONE)}</b>, "
+            f"and please quote your booking reference <b>{_esc(reference)}</b>.",
+            s["body"],
+        ),
+        Paragraph(_esc(f"{RESORT_NAME}, {RESORT_ADDRESS}"), s["small"]),
+    ]
+    box = Table([[text]], colWidths=[_CONTENT_W])
+    box.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), CREAM),
+        ("BOX", (0, 0), (-1, -1), 0.5, RULE_GREY),
+        ("LINEBEFORE", (0, 0), (0, -1), 3, GOLD),
+        ("LEFTPADDING", (0, 0), (-1, -1), 12),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+        ("TOPPADDING", (0, 0), (-1, -1), 8),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+    ]))
+    return [KeepTogether([box])]
+
+
+def _draw_first_header(canv: Any, reference: str, revision: int, confirmed_on: str) -> None:
+    top = _PAGE_H
+    canv.saveState()
+    canv.setFillColor(DARK_GREEN)
+    canv.rect(0, top - _FIRST_HEADER_H, _PAGE_W, _FIRST_HEADER_H, stroke=0, fill=1)
+    canv.setFillColor(GOLD)
+    canv.rect(0, top - _FIRST_HEADER_H - 3, _PAGE_W, 3, stroke=0, fill=1)
+
+    box_w, box_h = 188, 70
+    box_x = _PAGE_W - _MARGIN - box_w
+    left_w = box_x - _MARGIN - 16
+    canv.setFillColor(GOLD)
+    canv.setFont("Helvetica-Bold", 7.5)
+    canv.drawString(_MARGIN, top - 32, "DOWNINGS  ·  SHEEPHAVEN BAY  ·  CO. DONEGAL")
+    size, _ = _fit_lines(RESORT_NAME, "Times-Bold", 23, 15, left_w)
+    canv.setFillColor(colors.white)
+    canv.setFont("Times-Bold", size)
+    canv.drawString(_MARGIN, top - 60, RESORT_NAME)
+    canv.setFillColor(colors.HexColor("#E9D7A6"))
+    canv.setFont("Helvetica", 12)
+    canv.drawString(_MARGIN, top - 82, "Stay & Play Booking Confirmation")
+
+    box_y = top - (_FIRST_HEADER_H + box_h) / 2
+    canv.setFillColor(colors.HexColor("#27492F"))
+    canv.setStrokeColor(GOLD)
+    canv.setLineWidth(0.8)
+    canv.roundRect(box_x, box_y, box_w, box_h, 5, stroke=1, fill=1)
+    centre = box_x + box_w / 2
+    canv.setFillColor(GOLD)
+    canv.setFont("Helvetica-Bold", 7)
+    canv.drawCentredString(centre, box_y + box_h - 16, "BOOKING REFERENCE")
+    ref_size, ref_lines = _fit_lines(reference, "Helvetica-Bold", 15, 9, box_w - 16)
+    canv.setFillColor(colors.white)
+    canv.setFont("Helvetica-Bold", ref_size)
+    line_y = box_y + box_h - 33 - (6 if len(ref_lines) == 1 else 0)
+    for line in ref_lines[:3]:
+        canv.drawCentredString(centre, line_y, line)
+        line_y -= ref_size + 1
+    canv.setFillColor(colors.HexColor("#E9D7A6"))
+    canv.setFont("Helvetica", 7.5)
+    canv.drawCentredString(centre, box_y + 9, f"Revision {revision}  ·  Confirmed {confirmed_on}")
+    canv.restoreState()
+
+
+def _draw_later_header(canv: Any, reference: str) -> None:
+    canv.saveState()
+    canv.setFillColor(DARK_GREEN)
+    canv.rect(0, _PAGE_H - _LATER_HEADER_H, _PAGE_W, _LATER_HEADER_H, stroke=0, fill=1)
+    canv.setFillColor(GOLD)
+    canv.rect(0, _PAGE_H - _LATER_HEADER_H - 2, _PAGE_W, 2, stroke=0, fill=1)
+    canv.setFillColor(colors.white)
+    canv.setFont("Times-Bold", 12)
+    canv.drawString(_MARGIN, _PAGE_H - 22, RESORT_NAME)
+    size, _ = _fit_lines(reference, "Helvetica-Bold", 8.5, 6, _CONTENT_W - 230)
+    canv.setFillColor(GOLD)
+    canv.setFont("Helvetica-Bold", size)
+    canv.drawRightString(_PAGE_W - _MARGIN, _PAGE_H - 21.5, f"Booking confirmation  ·  {reference}")
+    canv.restoreState()
+
+
+class _NumberedCanvas(Canvas):
+    """Canvas that draws the footer (and test watermark) once the page count is known."""
+
+    def __init__(self, *args: Any, footer: dict[str, Any], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._footer = footer
+        self._saved_pages: list[dict[str, Any]] = []
+
+    def showPage(self) -> None:
+        self._saved_pages.append(dict(self.__dict__))
+        self._startPage()
+
+    def save(self) -> None:
+        total = len(self._saved_pages)
+        for number, state in enumerate(self._saved_pages, start=1):
+            self.__dict__.update(state)
+            self._draw_footer(number, total)
+            super().showPage()
+        super().save()
+
+    def _draw_footer(self, number: int, total: int) -> None:
+        info = self._footer
+        if info["is_test"]:
+            self.saveState()
+            self.setFillColor(ALERT_RED)
+            self.setFillAlpha(0.07)
+            self.setFont("Helvetica-Bold", 130)
+            self.translate(_PAGE_W / 2, _PAGE_H / 2 - 40)
+            self.rotate(40)
+            self.drawCentredString(0, 0, "TEST")
+            self.restoreState()
+        self.saveState()
+        self.setStrokeColor(RULE_GREY)
+        self.setLineWidth(0.6)
+        self.line(_MARGIN, 58, _PAGE_W - _MARGIN, 58)
+        self.setFillColor(TEXT_DARK)
+        self.setFont("Helvetica-Bold", 8)
+        self.drawString(_MARGIN, 46, f"Booking reference: {info['reference']}  ·  Revision {info['revision']}")
+        self.drawRightString(_PAGE_W - _MARGIN, 46, f"Page {number} of {total}")
+        self.setFillColor(INK_MUTED)
+        self.setFont("Helvetica", 7)
+        self.drawString(_MARGIN, 35, f"{RESORT_NAME}  ·  {RESORT_ADDRESS}  ·  {info['email']}")
+        self.drawString(
+            _MARGIN, 25,
+            f"Please keep this confirmation for your records. It shows the booking details recorded on {info['confirmed_on']}.",
+        )
+        if info["is_test"]:
+            self.setFillColor(ALERT_RED)
+            self.setFont("Helvetica-Bold", 7.5)
+            self.drawString(_MARGIN, 14, TEST_LABEL)
+        self.restoreState()
+
+
+def build_n07_confirmation_pdf(snapshot: BookingConfirmationSnapshot, *, reservations_email: str | None = None) -> bytes:
+    """Render the guest booking-confirmation PDF (A4) for Ticket N07.
+
+    Every booking fact comes from the saved snapshot; nothing is defaulted or guessed.
+
+    Guarantees:
+    - Escapes all snapshot strings before inserting them into ReportLab paragraphs.
+    - Test snapshots carry a visible banner, a watermark and a footer label on every page.
+    - Uses the exact validated amounts and currency from the snapshot.
+    - Shows the saved policy text. If a real booking has none, shows a marked placeholder
+      pointing to the terms version instead of inventing terms.
+    - Caps PDF output size to 2 MiB.
+
+    ``reservations_email`` is the configured reservations mailbox (for example the
+    ``EMAIL_HOTEL_RESERVATIONS`` setting). It falls back to the resort default.
+    """
+    if snapshot.is_test and not (snapshot.content.policy_text or "").strip():
         raise ValueError("Approved policy text is required for a booking confirmation PDF")
-    safe_policy = html.escape(policy_text).replace("\r\n", "\n").replace("\r", "\n").replace("\n", "<br/>")
-    elements.append(Paragraph(safe_policy, table_cell))
-    elements.append(Spacer(1, 10))
-    elements.append(HRFlowable(width="100%", thickness=0.5, color=BORDER_COLOR, spaceAfter=6))
-    elements.append(Paragraph("Rosapenna Hotel & Golf Resort &bull; Official Itinerary Document &bull; Generated Securely (N07 Structure Preview)", footer_style))
 
-    doc.build(elements)
-    buffer.seek(0)
+    email = reservations_email if reservations_email and _MAILBOX.fullmatch(reservations_email) else DEFAULT_RESERVATIONS_EMAIL
+    reference = snapshot.booking_reference
+    revision = snapshot.booking_revision
+    confirmed_on = _long_date(snapshot.confirmed_at, weekday=False)
+    s = _styles()
+
+    story: list[Any] = []
+    if snapshot.is_test:
+        story += _test_banner(s)
+    story += _welcome_block(snapshot, s)
+    story += _summary_cards(snapshot, s)
+    story += _golf_block(snapshot, s)
+    story += _payments_block(snapshot, s)
+    story += _next_steps_block(snapshot, s)
+    story += _terms_block(snapshot, s)
+    story += _contact_block(email, reference, s)
+
+    buffer = io.BytesIO()
+    doc = BaseDocTemplate(
+        buffer,
+        pagesize=A4,
+        title=f"Booking Confirmation {reference}" + (" (TEST)" if snapshot.is_test else ""),
+        author=RESORT_NAME,
+        subject="Stay & Play booking confirmation",
+        creator=RESORT_NAME,
+    )
+    frame_kwargs = {"leftPadding": 0, "rightPadding": 0, "topPadding": 0, "bottomPadding": 0}
+    first_top = _PAGE_H - _FIRST_HEADER_H - 3 - 16
+    later_top = _PAGE_H - _LATER_HEADER_H - 2 - 16
+    doc.addPageTemplates([
+        PageTemplate(
+            "first",
+            [Frame(_MARGIN, _FOOTER_H, _CONTENT_W, first_top - _FOOTER_H, id="first", **frame_kwargs)],
+            onPage=lambda canv, _doc: _draw_first_header(canv, reference, revision, confirmed_on),
+            autoNextPageTemplate="later",
+        ),
+        PageTemplate(
+            "later",
+            [Frame(_MARGIN, _FOOTER_H, _CONTENT_W, later_top - _FOOTER_H, id="later", **frame_kwargs)],
+            onPage=lambda canv, _doc: _draw_later_header(canv, reference),
+        ),
+    ])
+    footer = {
+        "reference": reference,
+        "revision": revision,
+        "confirmed_on": confirmed_on,
+        "email": email,
+        "is_test": snapshot.is_test,
+    }
+    doc.build(story, canvasmaker=lambda *args, **kwargs: _NumberedCanvas(*args, footer=footer, **kwargs))
     pdf_bytes = buffer.getvalue()
 
     # Enforce 2 MiB limit from N07 plan

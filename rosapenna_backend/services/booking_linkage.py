@@ -644,6 +644,12 @@ class BookingLinkageService:
             if doc is None:
                 raise LinkageNotFoundError(f"Booking reference '{booking_reference}' was not found.")
 
+            booked_currency = (doc.get("financials") or {}).get("currency", "EUR")
+            if payment.status == "completed" and payment.currency != booked_currency:
+                raise LinkageConflictError(
+                    f"Payment {payment.payment_id} currency {payment.currency} does not match booking currency {booked_currency}"
+                )
+
             current_ledger_version = doc.get("ledger_version", 1)
             if expected_ledger_version is not None and attempt == 0:
                 if current_ledger_version != expected_ledger_version:

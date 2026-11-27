@@ -124,7 +124,7 @@ class TestBookingConfirmationsApi(unittest.TestCase):
         self.db["package_quotes"].insert_one(source["quote"])
         for payment in source["payments"]:
             self.db["package_payments"].insert_one(payment)
-        self.db["booking_linkages"].insert_one(source["linkage"])
+        self.db["mmb_booking_linkages"].insert_one(source["linkage"])
 
     def authorize_scopes(self, event, actions=("read", "retry")):
         scopes = {f"booking:{event.booking_reference}:{action}" for action in actions}
@@ -361,6 +361,100 @@ class TestBookingConfirmationsApi(unittest.TestCase):
         self.assertEqual(deliveries["hotel"]["status"], "recorded_test")
         self.assertEqual(len(saved["confirmation"]["attempt_history"]), 2)
         self.assertEqual(self.coordinator.get_status(event.operation_id).overall_status, "recorded_test")
+
+    def _recipients(self):
+        return sorted(
+            "guest" if item["recipient"] == "lead@example.invalid" else "hotel"
+            for item in self.transport.recorded_submissions
+        )
+
+    def test_process_confirmed_operation_records_each_recipient_once(self):
+        event = make_test_confirmed_event(op_id="OP-PROCESS-HAPPY")
+        self.seed_operation(event)
+
+        status = self.coordinator.process_confirmed_operation(event.operation_id)
+        self.assertEqual(status.overall_status, "recorded_test")
+        self.assertEqual(self._recipients(), ["guest", "hotel"])
+
+        again = self.coordinator.process_confirmed_operation(event.operation_id)
+        self.assertEqual(again.overall_status, "recorded_test")
+        self.assertEqual(self._recipients(), ["guest", "hotel"])
+        saved = self.db["booking_operations"].find_one({"operation_id": event.operation_id})
+        self.assertEqual(len(saved["confirmation"]["attempt_history"]), 2)
+
+    def test_concurrent_process_calls_send_one_message_per_recipient(self):
+        event = make_test_confirmed_event(op_id="OP-PROCESS-CONCURRENT")
+        self.seed_operation(event)
+        coordinators = self._concurrent_coordinators()
+        self._barrier_before_claim(coordinators, threading.Barrier(2))
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda c: c.process_confirmed_operation(event.operation_id), coordinators))
+
+        self.assertEqual(len(results), 2)
+        self.assertEqual(self._recipients(), ["guest", "hotel"])
+        saved = self.db["booking_operations"].find_one({"operation_id": event.operation_id})
+        self.assertEqual(len(saved["confirmation"]["attempt_history"]), 2)
+        for role in ("guest", "hotel"):
+            self.assertEqual(saved["confirmation"]["deliveries"][role]["attempt_count"], 1)
+            self.assertEqual(saved["confirmation"]["deliveries"][role]["status"], "recorded_test")
+
+    def test_process_missing_or_tampered_event_sends_nothing(self):
+        missing = make_test_confirmed_event(op_id="OP-PROCESS-MISSING")
+        self.seed_operation(missing)
+        self.db["booking_operations"].update_one(
+            {"operation_id": missing.operation_id}, {"$set": {"confirmed_event": None}}
+        )
+        with self.assertRaises(ConfirmationConflictError):
+            self.coordinator.process_confirmed_operation(missing.operation_id)
+
+        tampered = make_test_confirmed_event(op_id="OP-PROCESS-TAMPERED", event_id="EVT-TAMPERED")
+        self.seed_operation(tampered)
+        self.db["booking_operations"].update_one(
+            {"operation_id": tampered.operation_id},
+            {"$set": {"confirmed_event.snapshot.lead_guest.last_name": "Changed After Hash"}},
+        )
+        with self.assertRaises(ConfirmationConflictError):
+            self.coordinator.process_confirmed_operation(tampered.operation_id)
+
+        self.assertEqual(self.transport.recorded_submissions, [])
+        for op_id in (missing.operation_id, tampered.operation_id):
+            saved = self.db["booking_operations"].find_one({"operation_id": op_id})
+            self.assertIsNone(saved.get("confirmation"))
+
+    def test_process_one_recipient_failure_keeps_other_and_booking_state(self):
+        event = make_test_confirmed_event(op_id="OP-PROCESS-PARTIAL")
+        self.seed_operation(event)
+        self.transport.simulated_behavior = {"default": "success", "lead@example.invalid": "refusal"}
+
+        status = self.coordinator.process_confirmed_operation(event.operation_id)
+        self.assertEqual(status.guest_delivery.status, "retryable_failure")
+        self.assertEqual(status.hotel_delivery.status, "recorded_test")
+        self.assertEqual(self._recipients(), ["hotel"])
+
+        # A repeat run must not auto-retry the failed guest; staff retry owns that.
+        self.transport.simulated_behavior = {"default": "success"}
+        self.coordinator.process_confirmed_operation(event.operation_id)
+        self.assertEqual(self._recipients(), ["hotel"])
+
+        saved = self.db["booking_operations"].find_one({"operation_id": event.operation_id})
+        self.assertEqual(saved["stage"], "completed")
+        self.assertIs(saved["payment_verified"], True)
+        self.assertEqual(saved["payment_id"], event.snapshot.payments[0].payment_id)
+
+    def test_find_pending_operations_returns_only_unsent_confirmed_work(self):
+        done = make_test_confirmed_event(op_id="OP-PENDING-DONE")
+        waiting = make_test_confirmed_event(op_id="OP-PENDING-WAITING", event_id="EVT-PENDING-WAITING")
+        no_event = make_test_confirmed_event(op_id="OP-PENDING-NO-EVENT", event_id="EVT-PENDING-NONE")
+        for event in (done, waiting, no_event):
+            self.seed_operation(event)
+        self.db["booking_operations"].update_one(
+            {"operation_id": no_event.operation_id}, {"$set": {"confirmed_event": None}}
+        )
+        self.coordinator.process_confirmed_operation(done.operation_id)
+
+        self.assertEqual(self.coordinator.find_pending_operations(), [waiting.operation_id])
+        self.assertEqual(self.coordinator.find_pending_operations(limit=0), [waiting.operation_id])
 
     def test_legacy_booking_confirmation_template_is_denied(self):
         """POST /communications/send with booking_confirmation must return 403."""

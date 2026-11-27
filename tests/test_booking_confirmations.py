@@ -6,13 +6,16 @@ import datetime as dt
 from decimal import Decimal
 from email import message_from_bytes
 import hashlib
+import base64
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import threading
 import tempfile
 import unittest
+import zlib
 from unittest.mock import patch
 
 from rosapenna_backend.api.schemas.communications import (
@@ -862,6 +865,202 @@ class TestBookingConfirmationsUnit(unittest.TestCase):
 
         self.assertEqual(engine._in_memory_by_id[operation_id]["confirmation"], binary_confirmation)
         self.assertEqual(engine._in_memory_records["hash-binary-save"]["confirmation"], binary_confirmation)
+
+
+def pdf_text(pdf_bytes: bytes) -> str:
+    """Extract page text from a ReportLab PDF without extra libraries (standard fonts, Flate+ASCII85 streams)."""
+    pieces: list[str] = []
+    token = re.compile(rb"\(((?:\\.|[^\\)])*)\)\s*Tj|(T\*|ET|BT)")
+    escape = re.compile(rb"\\([0-7]{3}|.)", re.S)
+
+    def unescape(match: re.Match) -> bytes:
+        value = match.group(1)
+        return bytes([int(value, 8)]) if len(value) == 3 and value.isdigit() else value
+
+    for stream in re.finditer(rb"stream\r?\n(.*?)endstream", pdf_bytes, re.S):
+        try:
+            content = zlib.decompress(base64.a85decode(stream.group(1).strip(), adobe=True))
+        except Exception:
+            continue
+        for match in token.finditer(content):
+            if match.group(1) is not None:
+                pieces.append(escape.sub(unescape, match.group(1)).decode("cp1252"))
+            else:
+                pieces.append(" ")
+    return " ".join("".join(pieces).split())
+
+
+def pdf_page_count(pdf_bytes: bytes) -> int:
+    return len(re.findall(rb"/Type /Page(?![A-Za-z])", pdf_bytes))
+
+
+def make_guest_snapshot(**changes) -> BookingConfirmationSnapshot:
+    """Valid synthetic snapshot with top-level or nested (dict) overrides."""
+    data = make_test_snapshot(script_injection_name="Seán").model_dump(mode="python")
+    for key, value in changes.items():
+        if isinstance(value, dict) and isinstance(data.get(key), dict):
+            data[key].update(value)
+        else:
+            data[key] = value
+    return BookingConfirmationSnapshot.model_validate(data)
+
+
+def make_real_snapshot(**changes) -> BookingConfirmationSnapshot:
+    """Valid non-test snapshot (no simulation run, no saved policy text)."""
+    base = {
+        "environment": "production",
+        "is_test": False,
+        "simulation_run_id": None,
+        "content": {"policy_text": None},
+    }
+    base.update(changes)
+    return make_guest_snapshot(**base)
+
+
+class TestGuestConfirmationPdf(unittest.TestCase):
+    """Guest-facing A4 confirmation PDF: content comes only from the snapshot."""
+
+    def test_pdf_contains_snapshot_facts(self):
+        snapshot = make_guest_snapshot(lead_guest={"first_name": "Seán", "last_name": "Ó Briain"})
+        pdf = build_n07_confirmation_pdf(snapshot)
+        text = pdf_text(pdf)
+
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        self.assertIn(b"/MediaBox [ 0 0 595.27", pdf)  # A4
+        self.assertIn(snapshot.booking_reference, text)
+        self.assertIn("Dear Seán Ó Briain,", text)
+        self.assertIn("10:30", text)
+        self.assertIn("Sandy Hills Links <>&", text)
+        self.assertIn("€1,200.00", text)
+        self.assertIn("€300.00", text)
+        self.assertIn("€900.00", text)
+        self.assertIn("Wednesday 20 May 2099", text)  # balance due date
+        self.assertIn("30 minutes before your tee time", text)
+        self.assertIn("Offline test terms only.", text)
+        self.assertIn("Terms version: v1.0-standard", text)
+        self.assertIn("reservations@rosapenna.ie", text)
+        self.assertRegex(text, rf"Page 1 of {pdf_page_count(pdf)}\b")
+        self.assertLessEqual(pdf_page_count(pdf), 2)
+        self.assertNotIn("http", text)  # no invented Manage My Booking or other URL
+
+    def test_test_banner_only_for_test_bookings(self):
+        test_text = pdf_text(build_n07_confirmation_pdf(make_guest_snapshot()))
+        self.assertIn("TEST BOOKING – NOT A REAL RESERVATION", test_text)
+        self.assertIn("TEST — NOT A REAL BOOKING CONFIRMATION", test_text)
+
+        real_text = pdf_text(build_n07_confirmation_pdf(make_real_snapshot()))
+        self.assertNotIn("TEST BOOKING", real_text)
+        self.assertNotIn("NOT A REAL", real_text)
+
+    def test_real_booking_without_policy_text_shows_marked_placeholder(self):
+        text = pdf_text(build_n07_confirmation_pdf(make_real_snapshot(terms_version="v2.3-approved")))
+        self.assertIn("Booking terms: see your reservation terms (version v2.3-approved).", text)
+        self.assertNotIn("%", text)  # no invented cancellation percentages
+        self.assertNotRegex(text, r"(?i)refund|cancellation fee")
+
+    def test_real_booking_with_policy_text_shows_it(self):
+        snapshot = make_real_snapshot(content={"policy_text": "Line one.\nLine two."})
+        text = pdf_text(build_n07_confirmation_pdf(snapshot))
+        self.assertIn("Line one. Line two.", text)
+        self.assertNotIn("see your reservation terms", text)
+
+    def test_test_booking_without_policy_text_still_fails(self):
+        snapshot = make_guest_snapshot()
+        snapshot.content.policy_text = None
+        with self.assertRaises(ValueError):
+            build_n07_confirmation_pdf(snapshot)
+
+    def test_guest_markup_is_shown_as_text_not_interpreted(self):
+        snapshot = make_guest_snapshot(
+            lead_guest={"first_name": "<b>Bold</b>", "last_name": "<font size='40'>Big</font> & Co"},
+        )
+        data = snapshot.model_dump(mode="python")
+        data["golf_rounds"][0]["course_name"] = "<img src='n07-test.png'/> Links"
+        data["golf_rounds"][0]["golfer_names"] = ["<u>Ann</u>", "Bob &amp; Cy"]
+        text = pdf_text(build_n07_confirmation_pdf(BookingConfirmationSnapshot.model_validate(data)))
+        self.assertIn("Dear <b>Bold</b> <font size='40'>Big</font> & Co,", text)
+        self.assertIn("<img src='n07-test.png'/> Links", text)
+        self.assertIn("<u>Ann</u>, Bob &amp; Cy", text)
+
+    def test_money_uses_snapshot_currency(self):
+        data = make_test_snapshot().model_dump(mode="python")
+        data["financials"]["currency"] = "GBP"
+        data["payments"][0]["currency"] = "GBP"
+        text = pdf_text(build_n07_confirmation_pdf(BookingConfirmationSnapshot.model_validate(data)))
+        self.assertIn("£1,200.00", text)
+        self.assertIn("£900.00", text)
+        self.assertNotIn("€", text)
+
+    def test_paid_in_full_has_no_balance_due_date(self):
+        snapshot = make_guest_snapshot(
+            financials={"total_amount": "300.00", "deposit_paid": "300.00", "verified_paid_total": "300.00", "balance_due": "0.00"},
+        )
+        text = pdf_text(build_n07_confirmation_pdf(snapshot))
+        self.assertIn("Your booking is paid in full.", text)
+        self.assertIn("€0.00 – paid in full", text)
+        self.assertNotIn("Balance due by", text)
+
+    def test_reservations_email_setting_is_used_and_validated(self):
+        snapshot = make_guest_snapshot()
+        custom = pdf_text(build_n07_confirmation_pdf(snapshot, reservations_email="stay.play@rosapenna.example"))
+        self.assertIn("stay.play@rosapenna.example", custom)
+        self.assertNotIn("reservations@rosapenna.ie", custom)
+        unsafe = pdf_text(build_n07_confirmation_pdf(snapshot, reservations_email="<b>x</b>@bad"))
+        self.assertIn("reservations@rosapenna.ie", unsafe)
+        self.assertNotIn("<b>x</b>", unsafe)
+
+    def test_six_rounds_and_long_unicode_names_do_not_raise(self):
+        long_first = "Wolfeschlegelsteinhausenbergerdorff-Ó Súilleabháin " * 2
+        names = [f"Alexandria Konstantinopoulos-Wolfeschlegel Ñandú Þórðarson {n}" for n in range(4)]
+        data = make_test_snapshot().model_dump(mode="python")
+        data["stay"].update(arrival_date="2099-06-01", departure_date="2099-06-07")
+        data["stay"]["rooms"][0]["occupant_names"] = names
+        data["lead_guest"].update(first_name=long_first.strip()[:100], last_name="Müller-Østergaard " * 5)
+        data["golf_rounds"] = [{
+            "round_key": f"RND-{n}", "course_name": "Old Tom Morris Links (Championship Tees) " * 2,
+            "date": f"2099-06-{2 + n:02d}", "tee_time": f"{8 + n:02d}:{n * 7:02d}", "timezone": "Europe/Dublin",
+            "players": 4, "holes": 18, "provider_booking_ids": [], "golfer_names": names,
+        } for n in range(6)]
+        snapshot = BookingConfirmationSnapshot.model_validate(data)
+        pdf = build_n07_confirmation_pdf(snapshot)
+        text = pdf_text(pdf)
+        self.assertTrue(pdf.startswith(b"%PDF"))
+        for n in range(6):
+            self.assertIn(f"{8 + n:02d}:{n * 7:02d}", text)
+        pages = pdf_page_count(pdf)
+        self.assertGreaterEqual(pages, 2)
+        self.assertRegex(text, rf"Page {pages} of {pages}\b")
+        self.assertLess(len(pdf), 2 * 1024 * 1024)
+
+    def test_names_outside_standard_font_do_not_raise(self):
+        snapshot = make_guest_snapshot(lead_guest={"first_name": "Łukasz", "last_name": "Żółć 李雷 Иван"})
+        self.assertTrue(build_n07_confirmation_pdf(snapshot).startswith(b"%PDF"))
+
+    def test_large_group_of_rooms_moves_to_rooming_table_without_layout_error(self):
+        data = make_test_snapshot().model_dump(mode="python")
+        data["stay"]["rooms"] = [{
+            "room_group_id": f"RG-{i}", "room_category": "deluxe_twin", "room_quantity": 1,
+            "occupant_names": [f"Guest Number {i}-{j} Longish-Surname" for j in range(20)],
+        } for i in range(10)]
+        data["content"]["policy_text"] = "Policy line. " * 300
+        pdf = build_n07_confirmation_pdf(BookingConfirmationSnapshot.model_validate(data))
+        text = pdf_text(pdf)
+        self.assertIn("Rooms & Guests", text)
+        self.assertIn("Guest Number 9-19 Longish-Surname", text)
+
+    def test_four_guests_in_two_rooms_and_one_round(self):
+        data = make_test_snapshot().model_dump(mode="python")
+        data["stay"]["rooms"] = [
+            {"room_group_id": "RG-1", "room_category": "deluxe_twin", "room_quantity": 1, "occupant_names": ["A One", "B Two"]},
+            {"room_group_id": "RG-2", "room_category": "superior_king", "room_quantity": 1, "occupant_names": ["C Three", "D Four"]},
+        ]
+        data["golf_rounds"][0]["players"] = 4
+        data["golf_rounds"][0]["golfer_names"] = ["A One", "B Two", "C Three", "D Four"]
+        text = pdf_text(build_n07_confirmation_pdf(BookingConfirmationSnapshot.model_validate(data)))
+        self.assertIn("Deluxe Twin", text)
+        self.assertIn("Superior King", text)
+        self.assertIn("4 guests", text)
+        self.assertIn("4 players", text)
 
 
 if __name__ == "__main__":

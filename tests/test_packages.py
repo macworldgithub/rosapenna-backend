@@ -79,6 +79,13 @@ def make_mock_opera_avail() -> RoomAvailabilityResponse:
     )
 
 
+def free_sheet(time: str, status: str = "Available") -> dict:
+    """A cached tee sheet with one row whose four player positions have the given status."""
+    return {"status": "success", "data": {"tee_times": [
+        {"time": time, "slots": {str(i): {"status": status} for i in range(4)}},
+    ]}}
+
+
 def make_mock_brs_avail(course_id: int, time: str, players: int) -> MagicMock:
     slot = MagicMock()
     slot.time = time
@@ -397,6 +404,7 @@ class PackageRouteHandlerTests(unittest.TestCase):
 
         self.mock_cache = MagicMock(spec=TeesheetCache)
         self.mock_cache.get_course_availability.return_value = make_mock_brs_avail(1, "09:30", 2)
+        self.mock_cache.get.return_value = free_sheet("09:30")
 
         self.service = PackagePricingService(
             opera_client=self.mock_opera,
@@ -407,6 +415,51 @@ class PackageRouteHandlerTests(unittest.TestCase):
 
     def tearDown(self):
         self.mongo.close()
+
+    def _paid_ready_quote(self):
+        return self.service.calculate_quote(PackageQuoteRequest(
+            arrival_date=dt.date(2027, 6, 10),
+            departure_date=dt.date(2027, 6, 12),
+            rooms=[RoomSelectionQuoteRequest(room_category="CLASSIC", room_quantity=1)],
+            golf_rounds=[
+                GolfRoundQuoteRequest(course_id=1, date=dt.date(2027, 6, 10), time="09:30", players=2),
+                GolfRoundQuoteRequest(course_id=3, date=dt.date(2027, 6, 11), time="09:30", players=2),
+            ],
+        ))
+
+    def _link_request(self, quote_id):
+        from rosapenna_backend.api.schemas.packages import PackagePaymentLinkRequest
+        return PackagePaymentLinkRequest(
+            quote_id=quote_id, lead_first_name="Ann", lead_last_name="Test", lead_email="ann@example.invalid",
+            lead_phone="+353871234567", residence_country="IE", accepted_terms=True,
+            additional_guests=[{"first_name": "Bob", "last_name": "Test"}],
+        )
+
+    def test_pre_payment_check_blocks_taken_tee_time(self):
+        quote = self._paid_ready_quote()
+        self.assertEqual(quote.status, "available", quote.errors)
+        self.mock_cache.get.return_value = free_sheet("09:30", status="Booked")
+        with self.assertRaisesRegex(ValueError, "no longer available.*No payment was requested"):
+            self.service.create_payment_link(self._link_request(quote.quote_id))
+        self.assertEqual(self.db["package_payments"].count_documents({}), 0)
+
+    def test_pre_payment_check_blocks_sold_out_room(self):
+        quote = self._paid_ready_quote()
+        self.assertEqual(quote.status, "available", quote.errors)
+        sold_out = make_mock_opera_avail()
+        for category in sold_out.categories:
+            category.available_rooms = 0
+        self.mock_opera.get_room_availability.return_value = sold_out
+        with self.assertRaisesRegex(ValueError, "room is no longer available.*No payment was requested"):
+            self.service.create_payment_link(self._link_request(quote.quote_id))
+        self.assertEqual(self.db["package_payments"].count_documents({}), 0)
+
+    def test_pre_payment_check_blocks_when_stock_cannot_be_read(self):
+        quote = self._paid_ready_quote()
+        self.assertEqual(quote.status, "available", quote.errors)
+        self.mock_cache.get.side_effect = RuntimeError("BRS down")
+        with self.assertRaisesRegex(ValueError, "could not confirm your tee time"):
+            self.service.create_payment_link(self._link_request(quote.quote_id))
 
     def test_quote_terms_version_and_expiry_generation(self):
         """Ticket N04: Quote generates terms version, expiry timestamp, and dual-fact rate basis."""

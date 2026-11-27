@@ -207,12 +207,12 @@ class PrommtClient:
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise PrommtAuthError(f"Prommt authentication failed (HTTP {exc.code})") from exc
-            err_body = exc.read().decode("utf-8", errors="replace")
-            logger.error("Prommt API error: HTTP %d: %s", exc.code, err_body)
-            raise PrommtError(f"Prommt API error (HTTP {exc.code}): {err_body}", status_code=exc.code) from exc
+            # The provider body can echo payer data, so it is neither logged nor returned.
+            logger.error("Prommt API error: HTTP %d", exc.code)
+            raise PrommtError(f"Prommt API error (HTTP {exc.code})", status_code=exc.code) from None
         except Exception as exc:
-            logger.error("Prommt network error: %s", exc)
-            raise PrommtError(f"Network error connecting to Prommt: {exc}") from exc
+            logger.error("Prommt network error: %s", type(exc).__name__)
+            raise PrommtError("Network error connecting to Prommt.") from None
 
     def get_payment_link(self, payment_request_id: str) -> str:
         """Get the payment link URL for a given payment request ID."""

@@ -130,17 +130,14 @@ def generate_preview_artifacts(recording_dir: Path, run_id: str) -> None:
     if rec.pdf_bytes:
         pdf_path.write_bytes(rec.pdf_bytes)
 
-    # 3. Dispatch guest
-    coord.dispatch_recipient(op_id, "guest")
-    # 4. Dispatch hotel
-    coord.dispatch_recipient(op_id, "hotel")
+    # 3. Dispatch guest and hotel through the same entry point a later runner will use
+    coord.process_confirmed_operation(op_id)
 
     # Rename emitted .eml files to stable guest.eml and hotel.eml for preview inspection
-    for eml_file in preview_dir.glob("*.eml"):
-        if "lead" in eml_file.name or "guest" in eml_file.name:
-            shutil.copyfile(eml_file, preview_dir / "guest.eml")
-        elif "hotel" in eml_file.name or "reservations" in eml_file.name:
-            shutil.copyfile(eml_file, preview_dir / "hotel.eml")
+    guest_address = event.snapshot.lead_guest.email.strip().lower()
+    for item in transport.recorded_submissions:
+        name = "guest.eml" if item["recipient"] == guest_address else "hotel.eml"
+        shutil.copyfile(item["file_path"], preview_dir / name)
 
     # 5. Save redacted status.json
     status = coord.get_status(op_id)

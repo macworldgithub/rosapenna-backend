@@ -175,7 +175,7 @@ class BookingConfirmationCoordinator:
                 )
                 for item in snapshot.payments
             ]
-            linkage = self.database["booking_linkages"].find_one(
+            linkage = self.database["mmb_booking_linkages"].find_one(
                 {"booking_reference": snapshot.booking_reference}
             )
         elif self.allow_in_memory_fixtures:
@@ -784,6 +784,65 @@ class BookingConfirmationCoordinator:
         return self._finish_attempt(
             operation_id, event.event_id, event.snapshot_hash, recipient_role, attempt_id, outcome
         )
+
+    def process_confirmed_operation(self, operation_id: str) -> StaffConfirmationStatusResponse:
+        """Prepare and send the first attempt for each recipient of one saved confirmed event.
+
+        Safe to call repeatedly or from several workers: preparation and claims are conditional,
+        accepted recipients are skipped, and failed or unknown attempts are never resent here.
+        """
+        op_doc = self._get_operation_doc(operation_id)
+        raw_event = op_doc.get("confirmed_event")
+        if not raw_event:
+            raise ConfirmationConflictError("Operation has no confirmed_event; booking is not verified confirmed")
+        try:
+            event = ConfirmedEvent.model_validate(raw_event)
+        except ValueError as exc:
+            raise ConfirmationConflictError("Saved confirmed event is invalid") from exc
+
+        self.prepare_confirmation(operation_id, event.event_id)
+        for role in ("guest", "hotel"):
+            try:
+                self.dispatch_recipient(
+                    operation_id, role, expected_event_id=event.event_id, actor="confirmation_processor"
+                )
+            except ConfirmationConflictError as exc:
+                logger.info("N07 %s delivery skipped for %s: %s", role, operation_id, exc.message)
+            except Exception as exc:  # One recipient must never block the other.
+                logger.error("N07 %s delivery failed for %s (%s)", role, operation_id, type(exc).__name__)
+        return self.get_status(operation_id)
+
+    def find_pending_operations(self, limit: int = 20) -> List[str]:
+        """Return a bounded batch of confirmed operations with a recipient not yet attempted."""
+        limit = max(1, min(int(limit), 100))
+        if self.collection is not None:
+            cursor = self.collection.find(
+                {
+                    "stage": "completed",
+                    "operation_type": "new_booking",
+                    "confirmed_event": {"$ne": None},
+                    "$or": [
+                        {"confirmation": None},
+                        {"confirmation.deliveries.guest.status": "prepared"},
+                        {"confirmation.deliveries.hotel.status": "prepared"},
+                    ],
+                },
+                {"operation_id": 1, "_id": 0},
+            ).sort("completed_at", 1).limit(limit)
+            return [doc["operation_id"] for doc in cursor if doc.get("operation_id")]
+        with self._lock:
+            pending = []
+            for op_id, doc in self._in_memory_records.items():
+                conf = doc.get("confirmation")
+                deliveries = (conf or {}).get("deliveries") or {}
+                if (
+                    doc.get("stage") == "completed"
+                    and doc.get("operation_type") == "new_booking"
+                    and doc.get("confirmed_event")
+                    and (not conf or any(d.get("status") == "prepared" for d in deliveries.values()))
+                ):
+                    pending.append(op_id)
+            return pending[:limit]
 
     def get_status(self, operation_id: str) -> StaffConfirmationStatusResponse:
         """Provide safe, masked status summary of confirmation deliveries for staff view."""

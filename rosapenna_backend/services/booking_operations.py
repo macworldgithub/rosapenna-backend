@@ -9,7 +9,8 @@ Enforces:
 5. Fail-safe reconciliation: paid but incomplete operations halt as unconfirmed, generate
    sanitized staff alerts, maintain linkage to the F11 payment ledger, and never trigger
    automatic refunds or duplicate charges.
-6. Email and PDF dispatch occurs strictly after all writes pass readback.
+6. A new booking saves its verified state and one durable `confirmed_event` together.
+   N07 owns confirmation delivery; the commit path sends no email.
 """
 
 from __future__ import annotations
@@ -45,6 +46,18 @@ from rosapenna_backend.api.schemas.booking_operations import (
     hash_idempotency_key,
 )
 from rosapenna_backend.api.schemas.brs_booking import CreateBrsRoundRequest
+from rosapenna_backend.api.schemas.communications import (
+    BookingConfirmationSnapshot,
+    ConfirmedEvent,
+    SnapshotContent,
+    SnapshotFinancials,
+    SnapshotGolfRound,
+    SnapshotLeadGuest,
+    SnapshotPayment,
+    SnapshotRoom,
+    SnapshotStay,
+)
+from rosapenna_backend.config import settings as app_settings
 from rosapenna_backend.integrations.opera.schemas import CreateReservationRequest, RoomOccupant, UpdateReservationRequest
 from rosapenna_backend.api.schemas.mmb_amendments import AmendmentOfferSnapshot
 from rosapenna_backend.api.schemas.packages import PackageGuestName, PackageQuoteResponse
@@ -60,6 +73,20 @@ from rosapenna_backend.services.package_pricing import PackagePricingService, co
 
 def _utc_now_str() -> str:
     return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+# Test snapshots must carry policy text; real terms text is not stored yet, so tests get a clear label only.
+TEST_POLICY_TEXT = "Offline test terms only. These terms are not approved for a real booking."
+
+
+def _money(value: Any) -> str:
+    """Return an exact two-place amount; reject missing, non-finite, negative, or sub-cent values."""
+    if value is None or isinstance(value, float):
+        raise ValueError("money value is missing or inexact")
+    amount = Decimal(str(value))
+    if not amount.is_finite() or amount < 0 or amount != amount.quantize(Decimal("0.01")):
+        raise ValueError("money value is invalid")
+    return f"{amount:.2f}"
 
 
 class OperationConflictError(Exception):
@@ -662,11 +689,6 @@ class BookingOperationEngine:
             else str(quote.itemized_rooms[0].subtotal) if getattr(quote, "itemized_rooms", None)
             else "0.00"
         )
-        total_price = (
-            str(quote.total_package_price)
-            if hasattr(quote, "total_package_price")
-            else str(getattr(quote, "total_price", "0.00"))
-        )
 
         if not opera_res_id:
             try:
@@ -885,63 +907,57 @@ class BookingOperationEngine:
                 brs_round_ids=existing_round_ids,
             )
 
-        # Save the verified booking before attempting notification delivery.
-        record.stage = "completed"
-        record.completed_at = _utc_now_str()
-        record.updated_at = record.completed_at
-        record.stage_history.append(
-            StageHistoryEntry(stage="completed", details="Hotel, golf, and booking linkage verified.")
-        )
-        self._save_record(record)
-
-        deposit_val = str(getattr(quote, "deposit_amount", "0.00"))
-        balance_val = str(getattr(quote, "balance_amount", "0.00"))
-        due_val = str(getattr(quote, "balance_due_date", quote.arrival_date))
-
-        booking_summary = {
-            "booking_reference": record.booking_reference,
-            "lead_guest": lead_guest,
-            "hotel": {
-                "room_type": room_category,
-                "arrival_date": str(quote.arrival_date),
-                "departure_date": str(quote.departure_date),
-                "nights": quote.nights,
-                "confirmation_number": opera_conf_num,
-            },
-            "golf_rounds": [
-                {
-                    "course_name": r.course_name,
-                    "date": str(r.date),
-                    "time": r.time,
-                    "players": r.players,
-                }
-                for r in golf_rounds
-            ],
-            "financials": {
-                "total_price": total_price,
-                "deposit_paid": deposit_val,
-                "balance_remaining": balance_val,
-                "balance_due_date": due_val,
-                "currency": "EUR",
-            },
-        }
-
+        # Save the verified booking and its single N07 handoff event in one write. No email is sent here.
+        completed_at = _utc_now_str()
         try:
-            email_result = self.email_service.send_booking_confirmation(
-                booking=booking_summary,
-                idempotency_key=f"email_{record.operation_id}",
+            confirmed_event = self._build_confirmed_event(
+                record=record,
+                quote=quote,
+                payment_doc=payment_doc,
+                linkage=linkage,
+                golf_rounds=golf_rounds,
+                round_ids=existing_round_ids,
+                booking_ids=existing_brs_bk_ids,
+                lead=link_req.lead_guest,
+                room_category=room_category,
+                completed_at=completed_at,
             )
-            record.email_delivery_id = email_result.delivery_id
-            delivery_detail = f"Confirmation notification result: {email_result.status}."
-        except Exception as exc:
-            logger.warning("Confirmation notification outcome unknown for %s (%s)", record.operation_id, type(exc).__name__)
-            delivery_detail = "Confirmation notification outcome unknown. Verify delivery before retrying."
+        except (AttributeError, ArithmeticError, KeyError, TypeError, ValueError) as exc:
+            logger.error("Confirmed event facts are incomplete for %s (%s)", record.operation_id, type(exc).__name__)
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="confirmed_event",
+                reason="Verified booking facts are incomplete. No confirmation event was created.",
+                payment_doc=payment_doc,
+                opera_res_id=opera_res_id,
+                brs_round_ids=existing_round_ids,
+            )
 
-        record.updated_at = _utc_now_str()
-        record.stage_history.append(
-            StageHistoryEntry(stage="completed", details=delivery_detail)
+        delivery_detail = "Confirmation event recorded. Delivery is handled separately."
+        completed = record.model_copy(deep=True)
+        completed.stage = "completed"
+        completed.completed_at = completed_at
+        completed.updated_at = completed_at
+        completed.stage_history.append(
+            StageHistoryEntry(
+                stage="completed",
+                details=f"Hotel, golf, and booking linkage verified. {delivery_detail}",
+            )
         )
-        self._save_record(record)
+        if self._commit_completed_with_event(completed, confirmed_event):
+            record = completed
+        else:
+            latest = self.get_operation(record.operation_id)
+            if latest is not None and latest.stage == "completed" and latest.confirmed_event:
+                return self.execute_operation(request)
+            return self._fail_to_reconciliation(
+                record=record,
+                failed_stage="completion_commit",
+                reason="The verified booking could not be saved with its confirmation event.",
+                payment_doc=payment_doc,
+                opera_res_id=opera_res_id,
+                brs_round_ids=existing_round_ids,
+            )
 
         logger.info(
             "Safe booking operation %s COMPLETED for %s",
@@ -962,6 +978,157 @@ class BookingOperationEngine:
             created_at=record.created_at,
             completed_at=record.completed_at,
         )
+
+    def _build_confirmed_event(
+        self,
+        *,
+        record: BookingOperationRecord,
+        quote: PackageQuoteResponse,
+        payment_doc: Dict[str, Any],
+        linkage: Any,
+        golf_rounds: List[Any],
+        round_ids: List[str],
+        booking_ids: List[str],
+        lead: LeadGuestContact,
+        room_category: str,
+        completed_at: str,
+    ) -> Dict[str, Any]:
+        """Build the N07 handoff from verified, saved facts only. Missing facts raise; nothing is defaulted."""
+        pricing_settings = getattr(self.pricing_service, "settings", None)
+        environment = (
+            getattr(pricing_settings, "environment", None)
+            if pricing_settings is not None
+            else app_settings.environment
+        )
+        environment = str(environment or "").strip().lower()
+        if payment_doc.get("environment") not in {None, environment}:
+            raise ValueError("payment environment does not match the booking environment")
+        is_test = payment_doc.get("is_test") is True
+        run_id = payment_doc.get("simulation_run_id") if is_test else None
+        if len(round_ids) != len(golf_rounds) or len(booking_ids) != len(golf_rounds):
+            raise ValueError("golf readback does not cover every accepted round")
+
+        total = _money(quote.total_package_price)
+        deposit = _money(quote.deposit_amount)
+        balance = _money(quote.balance_amount)
+        paid = _money(payment_doc["amount"])
+        if (
+            Decimal(paid) != Decimal(deposit)
+            or Decimal(deposit) + Decimal(balance) != Decimal(total)
+            or Decimal(_money(quote.total_rooms_price)) + Decimal(_money(quote.total_golf_price)) != Decimal(total)
+            or payment_doc.get("currency") != quote.currency
+        ):
+            raise ValueError("verified payment does not match the accepted quote totals")
+        if quote.balance_due_date is None:
+            raise ValueError("balance due date is missing")
+        verified_at = payment_doc["paid_at"]
+        if isinstance(verified_at, dt.datetime):
+            verified_at = verified_at.isoformat()
+
+        snapshot = BookingConfirmationSnapshot(
+            booking_reference=record.booking_reference,
+            booking_revision=linkage.revision,
+            confirmed_at=completed_at,
+            environment=environment,
+            is_test=is_test,
+            simulation_run_id=run_id,
+            accepted_quote_hash=compute_quote_hash(quote),
+            rules_version=quote.rules_version,
+            terms_version=quote.terms_version,
+            lead_guest=SnapshotLeadGuest(
+                first_name=lead.first_name,
+                last_name=lead.last_name,
+                email=lead.email,
+                telephone=lead.telephone,
+            ),
+            stay=SnapshotStay(
+                arrival_date=quote.arrival_date.isoformat(),
+                departure_date=quote.departure_date.isoformat(),
+                rooms=[SnapshotRoom(
+                    room_group_id=record.readback_evidence.opera_reservation_id,
+                    room_category=room_category,
+                    room_quantity=quote.itemized_rooms[0].room_quantity,
+                    occupant_names=[f"{lead.first_name} {lead.last_name}"],
+                )],
+            ),
+            golf_rounds=[
+                SnapshotGolfRound(
+                    round_key=round_id,
+                    course_name=round_spec.course_name,
+                    date=round_spec.date.isoformat(),
+                    tee_time=round_spec.time,
+                    players=round_spec.players,
+                    holes=18,
+                    provider_booking_ids=[booking_id],
+                )
+                for round_id, booking_id, round_spec in zip(round_ids, booking_ids, golf_rounds)
+            ],
+            financials=SnapshotFinancials(
+                currency=quote.currency,
+                total_amount=total,
+                deposit_paid=paid,
+                verified_paid_total=paid,
+                balance_due=f"{Decimal(total) - Decimal(paid):.2f}",
+                balance_due_date=quote.balance_due_date.isoformat(),
+            ),
+            payments=[SnapshotPayment(
+                payment_purpose=payment_doc.get("purpose") or payment_doc["payment_type"],
+                payment_id=payment_doc["payment_id"],
+                amount=paid,
+                currency=payment_doc["currency"],
+                verified_at=verified_at,
+                receipt_reference=payment_doc["transaction_id"],
+            )],
+            content=SnapshotContent(policy_text=TEST_POLICY_TEXT if is_test else None),
+        )
+        event = ConfirmedEvent(
+            event_id=f"EVT-{record.operation_id}",
+            operation_id=record.operation_id,
+            booking_reference=snapshot.booking_reference,
+            booking_revision=snapshot.booking_revision,
+            occurred_at=completed_at,
+            environment=environment,
+            evidence_source=payment_doc["evidence_source"],
+            is_test=is_test,
+            simulation_run_id=run_id,
+            snapshot_hash=snapshot.compute_hash(),
+            snapshot=snapshot,
+            evidence_refs={
+                "quote_id": quote.quote_id,
+                "payment_ids": [payment_doc["payment_id"]],
+                "opera_reservation_id": record.readback_evidence.opera_reservation_id,
+                "opera_confirmation_number": record.readback_evidence.opera_confirmation_number,
+                "brs_round_ids": sorted(round_ids),
+                "brs_booking_ids": sorted(booking_ids),
+                "booking_linkage_revision": snapshot.booking_revision,
+            },
+        )
+        return event.model_dump(mode="json")
+
+    def _commit_completed_with_event(self, record: BookingOperationRecord, event: Dict[str, Any]) -> bool:
+        """Save the final stage and the event in one conditional write. A second event is never written."""
+        doc = record.model_dump(mode="json", exclude={"confirmed_event", "confirmation"})
+        doc["confirmed_event"] = event
+        if self.collection is not None:
+            result = self.collection.update_one(
+                {
+                    "operation_id": record.operation_id,
+                    "idempotency_key_hash": record.idempotency_key_hash,
+                    "stage": {"$nin": ["completed", "unconfirmed_reconciliation"]},
+                    "confirmed_event": None,
+                },
+                {"$set": doc},
+            )
+            if result.modified_count != 1:
+                return False
+        with self._new_booking_lock:
+            existing = self._in_memory_by_id.get(record.operation_id, {})
+            if self.collection is None and existing.get("confirmed_event"):
+                return False
+            merged = {**existing, **doc}
+            self._in_memory_records[record.idempotency_key_hash] = merged
+            self._in_memory_by_id[record.operation_id] = merged
+        return True
 
     def _execute_amendment(
         self,

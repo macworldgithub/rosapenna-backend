@@ -41,7 +41,7 @@ from rosapenna_backend.integrations.prommt import (
 from rosapenna_backend.integrations.prommt.client import PrommtError
 from rosapenna_backend.services.booking_linkage import BookingLinkageService
 from rosapenna_backend.core.logging import logger
-from rosapenna_backend.integrations.brs.tee_sheet import COURSES
+from rosapenna_backend.integrations.brs.tee_sheet import COURSES, tee_time_is_empty
 from rosapenna_backend.integrations.opera.client import OperaClient, OperaIntegrationError
 from rosapenna_backend.services.booking_intents import BookingIntentStore, IntentNotFound
 from rosapenna_backend.services.tee_sheets import TeesheetCache
@@ -188,7 +188,8 @@ class PackagePricingService:
 
     def apply_prommt_test_payment(self, event: PrommtWebhookPayload) -> Optional[dict]:
         """Verify a signed TEST event against the exact stored deposit and provider record."""
-        if event.event not in {"PAID_SUCCESS", "SETTLED"}:
+        # Only PAID_SUCCESS is documented as paid; SETTLED is unconfirmed, so it is not trusted (fail closed).
+        if event.event != "PAID_SUCCESS":
             return None
         payment = self._get_prommt_test_deposit(prommt_request_id=event.resource_id)
         if payment is None:
@@ -235,8 +236,9 @@ class PackagePricingService:
             return payment
 
         details = self.prommt_client.get_test_payment_details(resource_id)
+        # Only PAID_SUCCESS is documented as paid; SETTLED is unconfirmed, so it is not trusted (fail closed).
         if (
-            details.status not in {"PAID_SUCCESS", "SETTLED"}
+            details.status != "PAID_SUCCESS"
             or details.external_id != booking_ref
             or details.amount != Decimal(payment["amount"])
             or details.currency != payment["currency"]
@@ -275,113 +277,6 @@ class PackagePricingService:
             {**scope, "status": "verified_paid", "prommt_event_id": {"$exists": False}},
             {"$set": {"prommt_event_id": event_id}},
         )
-
-    def process_prommt_webhook(
-        self,
-        raw_body: bytes,
-        signature_header: str,
-    ) -> dict:
-        """Process an official webhook callback from Prommt with HMAC-SHA256 (Ticket F11)."""
-        if not self.prommt_client.verify_webhook_signature(raw_body, signature_header):
-            logger.warning("Rejected Prommt webhook: invalid signature in X-Signature header")
-            raise ValueError("Invalid Prommt webhook signature")
-
-        try:
-            payload_json = json.loads(raw_body.decode("utf-8"))
-            event = PrommtWebhookPayload.model_validate(payload_json)
-        except ValueError:
-            raise ValueError("Malformed Prommt webhook payload") from None
-
-        if not self.prommt_client.verify_timestamp(event.timestamp):
-            raise ValueError("Webhook timestamp is expired or skewed")
-        if event.type != "PAYMENT_REQUEST" or event.mode not in {"TEST", "LIVE"}:
-            raise ValueError("Unsupported Prommt webhook type or mode")
-
-        if self.payments_collection is not None:
-            payment_doc = self.payments_collection.find_one({"prommt_request_id": event.resource_id})
-        else:
-            payment_doc = next(
-                (p for p in self._payments_cache.values() if p.get("prommt_request_id") == event.resource_id),
-                None,
-            )
-
-        if not payment_doc:
-            raise LookupError("Prommt payment request not found")
-
-        payment_doc = {key: value for key, value in payment_doc.items() if key != "_id"}
-        payment_id = payment_doc["payment_id"]
-        booking_ref = payment_doc.get("booking_reference")
-        if (
-            payment_doc.get("evidence_source") != "prommt"
-            or (event.mode == "TEST") != (payment_doc.get("is_test") is True)
-            or (event.external_id and event.external_id != booking_ref)
-        ):
-            raise ValueError("Prommt event does not match the stored payment request")
-
-        previous_status = payment_doc["status"]
-        if previous_status == "verified_paid":
-            logger.info("Prommt payment %s already verified_paid; idempotent return", payment_id)
-            return {
-                "status": "already_processed",
-                "payment_id": payment_id,
-                "payment_state": payment_doc["status"],
-            }
-
-        now_str = dt.datetime.now(dt.timezone.utc).isoformat()
-        if event.event in ("PAID_SUCCESS", "SETTLED"):
-            details = self.prommt_client.get_payment_details(event.resource_id)
-            if (
-                details.status not in {"PAID_SUCCESS", "SETTLED"}
-                or details.amount != Decimal(payment_doc["amount"])
-                or details.currency != payment_doc["currency"]
-                or not booking_ref
-                or details.external_id != booking_ref
-                or not details.transaction_id
-            ):
-                raise ValueError("Prommt payment details do not match the stored payment request")
-            if self.linkage_service is None or not booking_ref:
-                raise ValueError("Prommt deposit has no booking payment record")
-            self.linkage_service.record_payment(
-                booking_reference=booking_ref,
-                payment=PaymentLedgerEntry(
-                    payment_id=payment_id,
-                    provider="prommt",
-                    payment_type=payment_doc.get("payment_type", "deposit"),
-                    amount=payment_doc["amount"],
-                    currency=details.currency,
-                    status="completed",
-                    provider_reference=event.resource_id,
-                    verified_at=dt.datetime.now(dt.timezone.utc),
-                ),
-                actor="prommt_webhook",
-            )
-            payment_doc["status"] = "verified_paid"
-            payment_doc["provider_reference"] = event.resource_id
-            payment_doc["transaction_id"] = details.transaction_id
-            payment_doc["paid_at"] = now_str
-
-        elif event.event in ("PAID_FAILED", "ABANDONED", "CANCELED"):
-            payment_doc["status"] = "failed"
-            payment_doc["failure_reason"] = f"Prommt reported {event.event}"
-            payment_doc["failed_at"] = now_str
-        elif event.event == "EXPIRED":
-            payment_doc["status"] = "expired"
-
-        if self.payments_collection is not None and payment_doc["status"] != previous_status:
-            result = self.payments_collection.update_one(
-                {"payment_id": payment_id, "status": previous_status},
-                {"$set": payment_doc},
-            )
-            if not result.modified_count:
-                raise ValueError("Prommt payment changed during processing; retry the event")
-        self._payments_cache[payment_id] = payment_doc
-
-        return {
-            "status": "success",
-            "payment_id": payment_id,
-            "payment_state": payment_doc["status"],
-            "event": event.event,
-        }
 
     def search_stay_and_golf(self, request: PackageSearchRequest) -> PackageSearchResponse:
         """Execute a live search across Opera room categories and BRS three-course tee sheets."""
@@ -1103,6 +998,61 @@ class PackagePricingService:
         expires_dt = dt.datetime.fromisoformat(quote.expires_at)
         return dt.datetime.now(dt.timezone.utc) > expires_dt
 
+    def _check_booking_can_complete(self, quote: PackageQuoteResponse) -> None:
+        """Before any payment, prove the booking can be completed: exact totals and live room and tee-time stock.
+
+        These are the same facts the booking engine needs after payment, so a guest is never charged
+        for a booking that is already known to fail. Any doubt blocks the payment link (fail closed).
+        """
+        def blocked(reason: str, guest_message: str) -> ValueError:
+            logger.warning("Pre-payment check blocked quote %s: %s", quote.quote_id, reason)
+            return ValueError(f"{guest_message} No payment was requested.")
+
+        try:
+            total, deposit, balance, rooms, golf = (
+                Decimal(value) for value in (
+                    quote.total_package_price, quote.deposit_amount, quote.balance_amount,
+                    quote.total_rooms_price, quote.total_golf_price,
+                )
+            )
+        except Exception:
+            raise blocked("quote amounts are not valid numbers", "We could not verify the package price. Please refresh your quote.")
+        if (
+            deposit <= 0 or deposit + balance != total or rooms + golf != total
+            or not quote.currency or not quote.itemized_rooms or not quote.itemized_golf
+        ):
+            raise blocked("quote totals are incomplete or do not add up", "We could not verify the package price. Please refresh your quote.")
+
+        room = quote.itemized_rooms[0]
+        try:
+            availability = self.opera_client.get_room_availability(
+                arrival_date=quote.arrival_date,
+                departure_date=quote.departure_date,
+                adults=max(1, quote.guest_count or 1),
+                children=0,
+            )
+        except Exception as exc:
+            raise blocked(f"room availability check failed ({type(exc).__name__})", "We could not confirm the room is still available. Please try again shortly.")
+        buffer = (self.get_rules().category_buffers or {}).get(room.room_category.upper(), 0)
+        if not any(
+            category.room_category.upper() == room.room_category.upper()
+            and category.available_rooms - buffer >= room.room_quantity
+            for category in availability.categories
+        ):
+            raise blocked(f"room {room.room_category} no longer available", "Your room is no longer available for these dates. Please choose another room.")
+
+        for round_spec in quote.itemized_golf:
+            try:
+                sheet = self.teesheet_cache.get(round_spec.date, round_spec.course_id, force_refresh=True)
+                free = tee_time_is_empty(sheet, round_spec.time, round_spec.players)
+            except Exception as exc:
+                raise blocked(f"tee-sheet check failed ({type(exc).__name__})", "We could not confirm your tee time is still available. Please try again shortly.")
+            if not free:
+                raise blocked(
+                    f"tee time {round_spec.course_id} {round_spec.date} {round_spec.time} no longer free",
+                    f"{round_spec.course_name} at {round_spec.time} on {round_spec.date} is no longer available. Please choose another tee time.",
+                )
+
     def create_payment_link(
         self,
         request: PackagePaymentLinkRequest,
@@ -1132,6 +1082,8 @@ class PackagePricingService:
             raise ValueError(f"Enter a first and last name for each of the {quote.guest_count} guests on the quote.")
         if quote.guest_count is None and request.additional_guests:
             raise ValueError("Refresh your package quote before adding guest details.")
+
+        self._check_booking_can_complete(quote)
 
         quote_hash = compute_quote_hash(quote)
         is_simulation = False
@@ -1212,6 +1164,7 @@ class PackagePricingService:
                 "reserves_inventory": False,
                 "created_at": now_str,
                 "evidence_source": "simulation",
+                "environment": env_name,
                 "is_test": True,
                 "simulation_run_id": sim_run_id,
             }
@@ -1389,6 +1342,11 @@ class PackagePricingService:
         payment_doc = self.get_payment(request.payment_id)
         if not payment_doc:
             raise LookupError(f"Payment record {request.payment_id} not found")
+        if request.status in ("paid", "completed") and (
+            Decimal(request.amount) != Decimal(payment_doc["amount"])
+            or request.currency != payment_doc.get("currency", "EUR")
+        ):
+            raise ValueError("Payment callback amount or currency does not match the payment link")
 
         # 3. Idempotency: if already paid, do not re-process
         if payment_doc["status"] == "verified_paid" and request.status in ("paid", "completed"):
